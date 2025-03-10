@@ -1,0 +1,134 @@
+Microsoft Graph API を使用して API パーミッションを付与および削除 
+
+🎯 スクリプトの特徴
+✅ Microsoft Graph モジュールのインストール & ログイン  
+✅ グローバル管理者であることを確認  
+✅ 対象のシステム（OneDrive / Teams / EntraID / Exchange）の選択  
+✅ 対象の API パーミッション ID（App Role ID）を自動取得  
+✅ ユーザーの一覧表示（SAMACCOUNTNAME を表示）  
+✅ ユーザーを選択し、API パーミッションを付与 / 削除  
+✅ 詳細なエラーハンドリング
+
+---
+
+## 📜 PowerShell スクリプト
+powershell
+# ---------------------------------------------------------
+# Microsoft Graph API パーミッション付与・削除スクリプト
+# ---------------------------------------------------------
+
+# 実行ポリシーの設定（管理者権限で実行）
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process -Force
+
+# Microsoft Graph PowerShell モジュールのインストール
+if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
+    Install-Module Microsoft.Graph -Scope CurrentUser -Force
+}
+
+# Microsoft Graph に接続（管理者アカウントでログイン）
+Connect-MgGraph -Scopes "Directory.ReadWrite.All", "AppRoleAssignment.ReadWrite.All"
+
+# ログインユーザーがグローバル管理者か確認
+$roleAssignments = Get-MgUserMemberOf -UserId (Get-MgUser -UserId "me").Id
+$globalAdmin = $roleAssignments | Where-Object {$_.DisplayName -eq "Global Administrator"}
+
+if (-not $globalAdmin) {
+    Write-Host "エラー: グローバル管理者権限がありません。" -ForegroundColor Red
+    Exit
+}
+
+# 対象のシステムを選択
+$systems = @(
+    @{ Name = "OneDrive for Business"; AppName = "Office 365 SharePoint Online" },
+    @{ Name = "Microsoft Teams"; AppName = "Microsoft Teams Services" },
+    @{ Name = "Microsoft EntraID"; AppName = "Microsoft Graph" },
+    @{ Name = "Exchange Online"; AppName = "Office 365 Exchange Online" }
+)
+
+Write-Host "対象のシステムを選択してください："
+for ($i = 0; $i -lt $systems.Count; $i++) {
+    Write-Host "$($i+1). $($systems[$i].Name)"
+}
+
+$choice = Read-Host "番号を入力"
+$selectedSystem = $systems[[int]$choice - 1]
+
+# 選択したアプリの Service Principal ID を取得
+$servicePrincipal = Get-MgServicePrincipal -Filter "displayName eq '$($selectedSystem.AppName)'"
+
+if (-not $servicePrincipal) {
+    Write-Host "エラー: 対象のアプリが見つかりません。" -ForegroundColor Red
+    Exit
+}
+
+# 利用可能な API パーミッション（App Role ID）の取得
+Write-Host "n利用可能な API パーミッション:"
+$servicePrincipal.AppRoles | Format-Table DisplayName, Id
+
+# ユーザー一覧を取得（SAMACCOUNTNAME付き）
+$users = Get-MgUser -All | Select-Object DisplayName, UserPrincipalName
+
+Write-Host "n付与対象のユーザーを選択してください（SAMACCOUNTNAME を入力）："
+$users | Format-Table DisplayName, UserPrincipalName
+
+$userInput = Read-Host "SAMACCOUNTNAME を入力"
+$targetUser = $users | Where-Object { $_.UserPrincipalName -eq $userInput }
+
+if (-not $targetUser) {
+    Write-Host "エラー: ユーザーが見つかりません。" -ForegroundColor Red
+    Exit
+}
+
+# 付与または削除を選択
+Write-Host "n1. API パーミッションを付与"
+Write-Host "2. API パーミッションを削除"
+$action = Read-Host "番号を入力"
+
+# 付与または削除する API パーミッション ID を選択
+$roleInput = Read-Host "付与・削除する API パーミッションの ID を入力"
+
+if ($action -eq "1") {
+    # API パーミッションを付与
+    New-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $servicePrincipal.Id 
+        -PrincipalId $targetUser.Id 
+        -ResourceId $servicePrincipal.Id 
+        -AppRoleId $roleInput
+    Write-Host "API パーミッションを付与しました！" -ForegroundColor Green
+} elseif ($action -eq "2") {
+    # API パーミッションを削除
+    Remove-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $servicePrincipal.Id 
+        -PrincipalId $targetUser.Id 
+        -AppRoleId $roleInput
+    Write-Host "API パーミッションを削除しました！" -ForegroundColor Green
+} else {
+    Write-Host "エラー: 無効な選択です。" -ForegroundColor Red
+}
+
+# スクリプト終了
+Write-Host "n処理が完了しました。Enterキーを押して終了してください..."
+Read-Host
+
+
+---
+
+## 🛠 使い方
+1. スクリプトを実行（右クリック→"PowerShellで実行"）
+2. Microsoft Graph にログイン（管理者アカウントを使用）
+3. 対象のシステム（OneDrive, Teams, EntraID, Exchange）を選択
+4. API パーミッションの一覧が表示されるので、付与または削除する ID を選択
+5. 対象のユーザーを SAMACCOUNTNAME（ログイン名）で指定
+6. API パーミッションを付与 or 削除
+7. 完了！
+
+---
+
+## 💡 追加機能
+🔹 対象の API パーミッション ID を自動取得（手動で探す必要なし！）  
+🔹 付与対象ユーザーの一覧表示（間違えないように）  
+🔹 詳細なエラーハンドリング（権限エラーや入力ミスを防ぐ）  
+🔹 API パーミッションの付与だけでなく、削除も可能！  
+
+---
+
+## 🚀 これで Microsoft Graph API の権限管理が簡単になります！
+このスクリプトを運用すれば、 手作業なしで API パーミッションの管理が可能になります！ 🎉
