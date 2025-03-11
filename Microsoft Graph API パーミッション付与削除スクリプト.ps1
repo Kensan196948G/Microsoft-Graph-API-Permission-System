@@ -40,8 +40,13 @@ if ($PSVersionTable.PSVersion.Major -ge 6) {
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 }
 
-# スクリプト実行開始のログ
-$logFile = Join-Path $PSScriptRoot "GraphAPI_Permission_Log_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+# スクリプト実行開始のログとエラーハンドリング設定
+$currentDateTime = Get-Date
+$logFile = Join-Path $PSScriptRoot "MicrosoftGraphLog.$($currentDateTime.ToString('yyyyMMddHHmmss')).txt"
+$detailedLogEnabled = $true
+$script:errorCount = 0
+$script:warningCount = 0
+$script:startTime = $currentDateTime
 
 function Write-Log {
     param (
@@ -49,25 +54,117 @@ function Write-Log {
         [string]$Message,
         
         [Parameter(Mandatory = $false)]
-        [ValidateSet("INFO", "WARNING", "ERROR", "SUCCESS")]
-        [string]$Level = "INFO"
+        [ValidateSet("INFO", "WARNING", "ERROR", "SUCCESS", "DEBUG", "VERBOSE")]
+        [string]$Level = "INFO",
+        
+        [Parameter(Mandatory = $false)]
+        [switch]$NoConsole
     )
     
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
     $logMessage = "[$timestamp] [$Level] $Message"
     
-    # コンソールへの出力（色分け）
-    switch ($Level) {
-        "INFO"    { Write-Host $logMessage -ForegroundColor Cyan }
-        "WARNING" { Write-Host $logMessage -ForegroundColor Yellow }
-        "ERROR"   { Write-Host $logMessage -ForegroundColor Red }
-        "SUCCESS" { Write-Host $logMessage -ForegroundColor Green }
-        default   { Write-Host $logMessage }
+    # カウンターの更新
+    if ($Level -eq "ERROR") { $script:errorCount++ }
+    if ($Level -eq "WARNING") { $script:warningCount++ }
+    
+    # コンソールへの出力（色分け）- NoConsoleが指定されていない場合のみ
+    if (-not $NoConsole) {
+        switch ($Level) {
+            "INFO"    { Write-Host $logMessage -ForegroundColor Cyan }
+            "WARNING" { Write-Host $logMessage -ForegroundColor Yellow }
+            "ERROR"   { Write-Host $logMessage -ForegroundColor Red }
+            "SUCCESS" { Write-Host $logMessage -ForegroundColor Green }
+            "DEBUG"   { if ($detailedLogEnabled) { Write-Host $logMessage -ForegroundColor Magenta } }
+            "VERBOSE" { if ($detailedLogEnabled) { Write-Host $logMessage -ForegroundColor Gray } }
+            default   { Write-Host $logMessage }
+        }
     }
     
-    # ファイルへの書き込み
-    Add-Content -Path $logFile -Value $logMessage
+    # ファイルへの書き込み（常に全てのレベルを記録）
+    Add-Content -Path $logFile -Value $logMessage -Encoding UTF8
 }
+
+# 詳細なエラー情報を記録する関数
+function Write-ErrorDetail {
+    param (
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord,
+        
+        [Parameter(Mandatory = $false)]
+        [string]$CustomMessage = "エラーが発生しました"
+    )
+    
+    # 基本的なエラー情報をログに記録
+    Write-Log "$CustomMessage" "ERROR"
+    
+    # 詳細なエラー情報を収集
+    $errorDetails = @"
+==== 詳細エラー情報 ====
+時刻: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff")
+エラーメッセージ: $($ErrorRecord.Exception.Message)
+エラーカテゴリ: $($ErrorRecord.CategoryInfo.Category)
+エラーID: $($ErrorRecord.FullyQualifiedErrorId)
+エラー発生箇所: $($ErrorRecord.InvocationInfo.PositionMessage)
+Stacktrace:
+$($ErrorRecord.ScriptStackTrace)
+エラー詳細:
+$($ErrorRecord | Format-List -Property * | Out-String)
+"@
+    
+    # 詳細情報をログファイルのみに記録（コンソールには表示しない）
+    Write-Log $errorDetails "ERROR" -NoConsole
+    
+    # システム情報を収集
+    try {
+        $systemInfo = @"
+==== システム情報 ====
+PowerShell バージョン: $($PSVersionTable.PSVersion)
+OS: $([System.Environment]::OSVersion.VersionString)
+実行ユーザー: $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
+"@
+        Write-Log $systemInfo "DEBUG" -NoConsole
+    }
+    catch {
+        Write-Log "システム情報の収集中にエラーが発生しました: $_" "WARNING" -NoConsole
+    }
+    
+    return $ErrorRecord
+}
+
+# 実行時間を計測するための関数
+function Get-ExecutionDuration {
+    $currentTime = Get-Date
+    $duration = $currentTime - $script:startTime
+    return $duration
+}
+
+# 実行ステータスのサマリーをログに記録
+function Write-ExecutionSummary {
+    $duration = Get-ExecutionDuration
+    $summary = @"
+==== 実行サマリー ====
+処理開始時刻: $($script:startTime.ToString("yyyy-MM-dd HH:mm:ss"))
+処理終了時刻: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+総実行時間: $($duration.ToString("hh\:mm\:ss\.fff"))
+エラー数: $script:errorCount
+警告数: $script:warningCount
+"@
+    
+    Write-Log $summary "INFO"
+    
+    if ($script:errorCount -gt 0) {
+        Write-Log "エラーが発生しました。ログファイルを確認してください: $logFile" "WARNING"
+    }
+    else {
+        Write-Log "処理が正常に完了しました。" "SUCCESS"
+    }
+}
+
+# スクリプト実行開始を記録
+Write-Log "Microsoft Graph API パーミッション管理スクリプトを開始しています" "INFO"
+Write-Log "詳細ログ有効: $detailedLogEnabled" "DEBUG"
+Write-Log "ログファイル: $logFile" "DEBUG"
 
 function Show-Menu {
     param (
@@ -585,43 +682,75 @@ if ($confirmation -ne "Y" -and $confirmation -ne "y") {
 # バッチ処理の開始
 $successCount = 0
 $failureCount = 0
+$skippedCount = 0
 $errorDetails = @()
+$operationLog = @()
+
+Write-Log "バッチ処理を開始します。対象ユーザー数: $($targetUsers.Count)人" "INFO"
+Write-Log "処理内容: $($actionOptions[$actionChoice]) - $($selectedRole.DisplayName)" "INFO"
 
 foreach ($user in $targetUsers) {
+    $currentUserLog = @{
+        UserDisplayName = $user.DisplayName
+        UserPrincipalName = $user.UserPrincipalName
+        UserId = $user.Id
+        Action = $actionOptions[$actionChoice]
+        Permission = $selectedRole.DisplayName
+        Status = "処理中"
+        Timestamp = Get-Date
+        ErrorMessage = ""
+    }
+    
     try {
         if ($actionChoice -eq 0) {  # パーミッションを付与
             Write-Log "ユーザー「$($user.DisplayName)」にパーミッション「$($selectedRole.DisplayName)」を付与しています..." "INFO"
             
             # 既存の割り当てを確認
-            $existingAssignment = Get-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $servicePrincipal.Id -All | 
+            $existingAssignment = Get-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $servicePrincipal.Id -All |
                                   Where-Object { $_.PrincipalId -eq $user.Id -and $_.AppRoleId -eq $selectedRole.Id }
             
             if ($existingAssignment) {
                 Write-Log "ユーザー「$($user.DisplayName)」には既にこのパーミッションが付与されています" "WARNING"
+                $currentUserLog.Status = "スキップ"
+                $currentUserLog.ErrorMessage = "既に権限が付与済み"
+                $skippedCount++
                 continue
             }
             
+            # API呼び出し時間を記録
+            $apiStartTime = Get-Date
+            
             # パーミッション付与
-        
             New-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $servicePrincipal.Id `
                 -PrincipalId $user.Id `
                 -ResourceId $servicePrincipal.Id `
                 -AppRoleId $selectedRole.Id -ErrorAction Stop
+            
+            # API呼び出し時間を計測
+            $apiDuration = (Get-Date) - $apiStartTime
+            Write-Log "API呼び出し時間: $($apiDuration.TotalMilliseconds)ms" "VERBOSE" -NoConsole
                 
             $successCount++
+            $currentUserLog.Status = "成功"
             Write-Log "ユーザー「$($user.DisplayName)」へのパーミッション付与に成功しました" "SUCCESS"
         }
         elseif ($actionChoice -eq 1) {  # パーミッションを削除
             Write-Log "ユーザー「$($user.DisplayName)」からパーミッション「$($selectedRole.DisplayName)」を削除しています..." "INFO"
             
             # 既存の割り当てを確認
-            $existingAssignments = Get-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $servicePrincipal.Id -All | 
+            $existingAssignments = Get-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $servicePrincipal.Id -All |
                                  Where-Object { $_.PrincipalId -eq $user.Id -and $_.AppRoleId -eq $selectedRole.Id }
             
             if (-not $existingAssignments -or $existingAssignments.Count -eq 0) {
                 Write-Log "ユーザー「$($user.DisplayName)」にはこのパーミッションが付与されていません" "WARNING"
+                $currentUserLog.Status = "スキップ"
+                $currentUserLog.ErrorMessage = "権限が付与されていない"
+                $skippedCount++
                 continue
             }
+            
+            # API呼び出し時間を記録
+            $apiStartTime = Get-Date
             
             # 各割り当ての削除
             foreach ($assignment in $existingAssignments) {
@@ -629,32 +758,103 @@ foreach ($user in $targetUsers) {
                 Remove-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $servicePrincipal.Id `
                     -AppRoleAssignmentId $assignment.Id -ErrorAction Stop
             }
+            
+            # API呼び出し時間を計測
+            $apiDuration = (Get-Date) - $apiStartTime
+            Write-Log "API呼び出し時間: $($apiDuration.TotalMilliseconds)ms" "VERBOSE" -NoConsole
                 
             $successCount++
+            $currentUserLog.Status = "成功"
             Write-Log "ユーザー「$($user.DisplayName)」からのパーミッション削除に成功しました" "SUCCESS"
         }
     }
     catch {
         $failureCount++
-        $errorMessage = "ユーザー「$($user.DisplayName)」の処理中にエラーが発生しました: $_"
+        $currentUserLog.Status = "失敗"
+        $currentUserLog.ErrorMessage = $_.Exception.Message
+        
+        # 詳細なエラー情報を記録
+        Write-ErrorDetail $_ "ユーザー「$($user.DisplayName)」の処理中にエラーが発生しました"
+        
         $errorDetails += "$($user.UserPrincipalName): $($_.Exception.Message)"
-        Write-Log $errorMessage "ERROR"
     }
+    
+    # 操作ログに追加
+    $operationLog += $currentUserLog
 }
+
+# 詳細な操作ログをファイルに記録
+$operationLogContent = "==== 操作詳細ログ ====`n"
+$operationLogContent += "処理時刻: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`n"
+$operationLogContent += "システム: $($selectedSystem.Name)`n"
+$operationLogContent += "パーミッション: $($selectedRole.DisplayName)`n"
+$operationLogContent += "アクション: $($actionOptions[$actionChoice])`n"
+$operationLogContent += "`n--- ユーザー別処理結果 ---`n"
+
+foreach ($entry in $operationLog) {
+    $operationLogContent += "ユーザー: $($entry.UserDisplayName) ($($entry.UserPrincipalName))`n"
+    $operationLogContent += "  ステータス: $($entry.Status)`n"
+    $operationLogContent += "  処理時刻: $($entry.Timestamp.ToString('yyyy-MM-dd HH:mm:ss'))`n"
+    if ($entry.ErrorMessage) {
+        $operationLogContent += "  エラー: $($entry.ErrorMessage)`n"
+    }
+    $operationLogContent += "`n"
+}
+
+# 操作ログをファイルに記録
+Write-Log $operationLogContent "VERBOSE" -NoConsole
 
 # 処理結果の表示
 Write-Host "`n処理結果サマリー:" -ForegroundColor Cyan
 Write-Host "  成功: $successCount ユーザー" -ForegroundColor Green
+Write-Host "  スキップ: $skippedCount ユーザー" -ForegroundColor Yellow
 Write-Host "  失敗: $failureCount ユーザー" -ForegroundColor $(if ($failureCount -gt 0) { "Red" } else { "Green" })
+Write-Host "  合計: $($successCount + $skippedCount + $failureCount) ユーザー" -ForegroundColor White
 
 if ($errorDetails.Count -gt 0) {
     Write-Host "`nエラー詳細:" -ForegroundColor Red
     $errorDetails | ForEach-Object { Write-Host "  * $_" -ForegroundColor Red }
+    
+    # 詳細エラーログにも記録
+    Write-Log "==== 処理中のエラー詳細 ====" "ERROR" -NoConsole
+    $errorDetails | ForEach-Object {
+        Write-Log "  * $_" "ERROR" -NoConsole
+    }
 }
-Write-Log "スクリプトの実行が完了しました。成功: $successCount, 失敗: $failureCount" $(if ($failureCount -gt 0) { "WARNING" } else { "SUCCESS" })
+
+# 操作の詳細をログに記録
+$operationSummary = @"
+==== 操作サマリー ====
+システム: $($selectedSystem.Name)
+パーミッション: $($selectedRole.DisplayName)
+アクション: $($actionOptions[$actionChoice])
+対象ユーザー数: $($targetUsers.Count)
+処理成功: $successCount
+処理スキップ: $skippedCount
+処理失敗: $failureCount
+"@
+Write-Log $operationSummary "INFO"
+
+# 実行サマリーをログに記録
+Write-ExecutionSummary
+
+# 総合結果ステータスを判定
+$resultStatus = if ($failureCount -gt 0) {
+    "一部失敗"
+} elseif ($skippedCount -gt 0 -and $successCount -eq 0) {
+    "全てスキップ"
+} elseif ($successCount -gt 0) {
+    "成功"
+} else {
+    "不明"
+}
+
+Write-Log "処理総合結果: $resultStatus" $(if ($failureCount -gt 0) { "WARNING" } else { "SUCCESS" })
 
 # スクリプト終了
-Write-Host "`n処理が完了しました。ログは次の場所に保存されました: $logFile" -ForegroundColor Cyan
+Write-Host "`n処理が完了しました。" -ForegroundColor Cyan
+Write-Host "実況ログは次の場所に保存されました: $logFile" -ForegroundColor Cyan
+Write-Host "詳細な情報やエラー内容もログファイルに記録されています。" -ForegroundColor White
 Write-Host "Enterキーを押して終了してください..." -ForegroundColor Cyan
 Read-Host
 
