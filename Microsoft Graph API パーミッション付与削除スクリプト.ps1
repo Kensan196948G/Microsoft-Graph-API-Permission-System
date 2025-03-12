@@ -464,7 +464,7 @@ catch {
 if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
     try {
         Write-Log "Microsoft Graph モジュールをインストールしています..." "INFO"
-        Install-Module Microsoft.Graph -Scope CurrentUser -Force -ErrorAction Stop
+        Install-Module Microsoft.Graph -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
         Write-Log "Microsoft Graph モジュールのインストールに成功しました" "SUCCESS"
     }
     catch [System.UnauthorizedAccessException] {
