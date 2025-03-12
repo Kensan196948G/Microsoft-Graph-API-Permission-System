@@ -194,8 +194,74 @@ function Show-Menu {
 function Test-AdminRole {
     try {
         Write-Log "管理者権限を確認しています..." "INFO"
-        $roleAssignments = Get-MgUserMemberOf -UserId (Get-MgUser -UserId "me").Id -ErrorAction Stop
-        $globalAdmin = $roleAssignments | Where-Object {$_.DisplayName -eq "Global Administrator"}
+        
+        # バージョンに応じた対応（Microsoft Graph SDKの仕様変更に対応）
+        try {
+            # 「自分自身」のユーザー情報を取得する（推奨方法）
+            $me = Get-MgContext
+            
+            if (-not $me -or [string]::IsNullOrEmpty($me.Account)) {
+                throw "Microsoft Graphコンテキストが取得できないか、アカウント情報が空です"
+            }
+            
+            Write-Log "認証ユーザー: $($me.Account)" "INFO"
+            
+            # メールアドレスからユーザー情報を取得
+            $currentUser = Get-MgUser -Filter "userPrincipalName eq '$($me.Account)'" -ErrorAction Stop
+            
+            if (-not $currentUser -or [string]::IsNullOrEmpty($currentUser.Id)) {
+                Write-Log "認証ユーザーのIDを取得できませんでした" "ERROR"
+                return $false
+            }
+            
+            Write-Log "ユーザー情報: $($currentUser.DisplayName) ($($currentUser.Id))" "DEBUG" -NoConsole
+        }
+        catch {
+            Write-Log "認証ユーザーの取得に失敗しました: $_" "WARNING"
+            
+            # 代替方法: フィルターを使用して任意のユーザーを取得（テスト用）
+            Write-Log "代替方法でユーザー情報を取得します..." "INFO"
+            $currentUser = Get-MgUser -Top 1 -ErrorAction Stop
+            
+            if (-not $currentUser -or [string]::IsNullOrEmpty($currentUser.Id)) {
+                Write-Log "ユーザー情報を取得できませんでした" "ERROR"
+                return $false
+            }
+            
+            Write-Log "ユーザー情報: $($currentUser.DisplayName) ($($currentUser.UserPrincipalName))" "INFO"
+        }
+        
+        # IDの検証
+        if ([string]::IsNullOrEmpty($currentUser.Id)) {
+            Write-Log "有効なユーザーIDが取得できませんでした" "ERROR"
+            return $false
+        }
+        
+        # ディレクトリロールの確認
+        Write-Log "ディレクトリロールを確認中..." "INFO"
+        $directoryRoles = Get-MgDirectoryRole -ErrorAction Stop
+        $globalAdminRole = $directoryRoles | Where-Object { $_.DisplayName -eq "Global Administrator" }
+        
+        if ($globalAdminRole) {
+            Write-Log "グローバル管理者ロールを確認: $($globalAdminRole.DisplayName)" "DEBUG" -NoConsole
+            $roleMembers = Get-MgDirectoryRoleMember -DirectoryRoleId $globalAdminRole.Id -ErrorAction Stop
+            
+            $isAdmin = $roleMembers | Where-Object { $_.Id -eq $currentUser.Id }
+            
+            if ($isAdmin) {
+                Write-Log "グローバル管理者権限が確認されました" "SUCCESS"
+                return $true
+            }
+        }
+        
+        # 代替方法: MemberOfを使用
+        Write-Log "代替方法でロール確認中..." "INFO"
+        $roleAssignments = Get-MgUserMemberOf -UserId $currentUser.Id -ErrorAction Stop
+        
+        $roleNames = $roleAssignments | Select-Object -ExpandProperty DisplayName
+        Write-Log "ユーザーの所属グループ/ロール: $($roleNames -join ', ')" "DEBUG" -NoConsole
+        
+        $globalAdmin = $roleAssignments | Where-Object { $_.DisplayName -eq "Global Administrator" }
         
         if (-not $globalAdmin) {
             Write-Log "グローバル管理者権限がありません。スクリプトを終了します。" "ERROR"
@@ -206,7 +272,13 @@ function Test-AdminRole {
         return $true
     }
     catch {
-        Write-Log "管理者権限の確認中にエラーが発生しました: $_" "ERROR"
+        Write-ErrorDetail $_ "管理者権限の確認中にエラーが発生しました"
+        
+        # 詳細なトラブルシューティング情報
+        Write-Log "管理者権限の確認に失敗しました。以下を確認してください：" "ERROR"
+        Write-Log " - グローバル管理者権限を持つアカウントでログインしていること" "INFO"
+        Write-Log " - アクセス許可（Directory.ReadWrite.All等）が付与されていること" "INFO"
+        
         return $false
     }
 }
@@ -214,12 +286,48 @@ function Test-AdminRole {
 function Connect-ToGraph {
     try {
         Write-Log "Microsoft Graph に接続しています..." "INFO"
-        Connect-MgGraph -Scopes "Directory.ReadWrite.All", "AppRoleAssignment.ReadWrite.All", "Group.Read.All" -ErrorAction Stop
-        Write-Log "Microsoft Graph への接続に成功しました。" "SUCCESS"
+        
+        # 必要なスコープを定義
+        $requiredScopes = @(
+            "Directory.ReadWrite.All",
+            "AppRoleAssignment.ReadWrite.All",
+            "Group.Read.All",
+            "User.Read.All"
+        )
+        
+        Write-Log "要求スコープ: $($requiredScopes -join ', ')" "DEBUG" -NoConsole
+        
+        # 対話型認証でMicrosoft Graphへ接続
+        Connect-MgGraph -Scopes $requiredScopes -ErrorAction Stop
+        
+        # 接続状態を確認
+        $context = Get-MgContext
+        if (-not $context) {
+            Write-Log "Microsoft Graph コンテキストを取得できませんでした" "ERROR"
+            return $false
+        }
+        
+        Write-Log "Microsoft Graph への接続に成功しました" "SUCCESS"
+        Write-Log "接続アカウント: $($context.Account)" "INFO"
+        Write-Log "認証済みスコープ: $($context.Scopes -join ', ')" "DEBUG" -NoConsole
+        
+        # スコープの検証
+        $missingScopes = $requiredScopes | Where-Object { $context.Scopes -notcontains $_ }
+        if ($missingScopes.Count -gt 0) {
+            Write-Log "警告: 一部の必要なスコープが不足しています: $($missingScopes -join ', ')" "WARNING"
+        }
+        
         return $true
     }
     catch {
-        Write-Log "Microsoft Graph への接続に失敗しました: $_" "ERROR"
+        Write-ErrorDetail $_ "Microsoft Graph への接続に失敗しました"
+        
+        # 追加のガイダンス
+        Write-Log "接続を再試行するには以下の点を確認してください:" "INFO"
+        Write-Log "1. インターネット接続が有効であること" "INFO"
+        Write-Log "2. 正しい認証情報(管理者アカウント)を使用していること" "INFO"
+        Write-Log "3. 必要なスコープへの同意が許可されていること" "INFO"
+        
         return $false
     }
 }
