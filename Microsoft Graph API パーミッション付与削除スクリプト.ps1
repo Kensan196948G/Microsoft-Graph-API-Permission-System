@@ -379,17 +379,88 @@ function Select-TargetUsers {
             
             try {
                 Write-Log "ユーザーを検索しています: $searchQuery" "INFO"
-                $foundUsers = Get-MgUser -Filter "startswith(displayName,'$searchQuery') or startswith(userPrincipalName,'$searchQuery') or startswith(onPremisesSamAccountName,'$searchQuery')" -Top 10 -ErrorAction Stop | 
-                              Select-Object DisplayName, UserPrincipalName, Id
+                
+                # 検索対象の属性リスト
+                $searchAttributes = @(
+                    @{ Name = "表示名"; Field = "displayName" },
+                    @{ Name = "メールアドレス"; Field = "userPrincipalName" },
+                    @{ Name = "名"; Field = "givenName" },
+                    @{ Name = "姓"; Field = "surname" }
+                )
+                
+                $foundUsers = @()
+                
+                # API経由で検索可能な属性を検索
+                foreach ($attr in $searchAttributes) {
+                    try {
+                        Write-Log "$($attr.Name)で検索中..." "DEBUG" -NoConsole
+                        $filter = "startswith($($attr.Field),'$searchQuery')"
+                        $users = Get-MgUser -Filter $filter -Top 10 -Property DisplayName, UserPrincipalName, Id, OnPremisesSamAccountName, GivenName, Surname -ErrorAction Stop
+                        
+                        if ($users -and $users.Count -gt 0) {
+                            Write-Log "$($attr.Name)での検索で $($users.Count) 件ヒットしました" "DEBUG" -NoConsole
+                            $foundUsers += $users
+                        }
+                    }
+                    catch {
+                        Write-Log "$($attr.Name)での検索に失敗しました: $_" "DEBUG" -NoConsole
+                        # エラーが発生しても続行
+                        continue
+                    }
+                }
+                
+                # SAMアカウント名での検索（APIでフィルタリングできないため、クライアント側でフィルタリング）
+                try {
+                    Write-Log "SAMアカウント名を含む追加検索を実行中..." "DEBUG" -NoConsole
+                    
+                    # まず、APIでの検索結果数が少ない場合に限りすべてのユーザーを取得
+                    if ($foundUsers.Count -lt 5) {
+                        # 追加の属性を含む検索（具体的な属性を用いて検索）
+                        $allUsers = Get-MgUser -Top 100 -Property DisplayName, UserPrincipalName, Id, OnPremisesSamAccountName, GivenName, Surname -ErrorAction Stop
+                        
+                        # SAMアカウント名でフィルタリング（PowerShellクライアント側）
+                        $samUsers = $allUsers | Where-Object {
+                            $_.OnPremisesSamAccountName -and $_.OnPremisesSamAccountName.StartsWith($searchQuery)
+                        }
+                        
+                        if ($samUsers -and $samUsers.Count -gt 0) {
+                            Write-Log "SAMアカウント名での検索で $($samUsers.Count) 件ヒットしました" "DEBUG" -NoConsole
+                            $foundUsers += $samUsers
+                        }
+                    }
+                }
+                catch {
+                    Write-Log "SAMアカウント名での検索に失敗しました: $_" "DEBUG" -NoConsole
+                    # エラーが発生しても続行
+                }
+                
+                # 重複を削除
+                $foundUsers = $foundUsers | Sort-Object -Property Id -Unique |
+                             Select-Object DisplayName, UserPrincipalName, Id, OnPremisesSamAccountName, GivenName, Surname
                 
                 if ($foundUsers.Count -eq 0) {
-                    Write-Log "検索条件に一致するユーザーが見つかりませんでした" "WARNING"
+                    Write-Log "検索条件「$searchQuery」に一致するユーザーが見つかりませんでした" "WARNING"
                     return $null
                 }
                 
                 Write-Log "$($foundUsers.Count) 人のユーザーが見つかりました" "INFO"
                 
-                $userOptions = $foundUsers | ForEach-Object { "$($_.DisplayName) ($($_.UserPrincipalName))" }
+                # より詳細な情報を表示するオプションリストを作成
+                $userOptions = $foundUsers | ForEach-Object {
+                    $details = "$($_.DisplayName) ($($_.UserPrincipalName))"
+                    
+                    # SAMアカウント名があれば追加
+                    if ($_.OnPremisesSamAccountName) {
+                        $details += " [SAM: $($_.OnPremisesSamAccountName)]"
+                    }
+                    
+                    # 姓名の情報を追加（表示名と異なる場合のみ）
+                    if ($_.GivenName -and $_.Surname -and "$($_.Surname) $($_.GivenName)" -ne $_.DisplayName) {
+                        $details += " - $($_.GivenName) $($_.Surname)"
+                    }
+                    
+                    return $details
+                }
                 
                 if ($AllowMultiple) {
                     # 複数ユーザー選択
