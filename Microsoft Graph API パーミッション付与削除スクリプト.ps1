@@ -724,36 +724,82 @@ if ($actionChoice -eq 2) {
 
 # 利用可能な API パーミッション（App Role ID）の取得
 try {
-    $appRoles = $servicePrincipal.AppRoles | Where-Object { $_.IsEnabled -eq $true } | 
-                Select-Object DisplayName, Id, Description, Value
-    
-    if ($appRoles.Count -eq 0) {
-        Write-Log "利用可能なAPIパーミッションが見つかりませんでした" "ERROR"
-        exit 1
+$appRoles = $servicePrincipal.AppRoles | Where-Object { $_.IsEnabled -eq $true } |
+            Select-Object DisplayName, Id, Description, Value
+
+if ($appRoles.Count -eq 0) {
+    Write-Log "利用可能なAPIパーミッションが見つかりませんでした" "ERROR"
+    exit 1
+}
+
+Write-Log "$($appRoles.Count) 個のAPIパーミッションが見つかりました" "INFO"
+
+# パーミッション表示の簡略化
+Write-Host "`n利用可能な API パーミッション:" -ForegroundColor Cyan
+$appRoleOptions = @()
+
+# 詳細情報フラグ
+$showDetailedInfo = $false
+if ($detailedLogEnabled) {
+    $showDetailInfo = Read-Host "パーミッションの詳細情報も表示しますか？(Y/N)"
+    $showDetailedInfo = ($showDetailInfo -eq "Y" -or $showDetailInfo -eq "y")
+}
+
+# SharePointフィルタリング
+$showSharePointPermissions = $true
+if ($selectedSystem.Name -eq "OneDrive for Business") {
+    $showSharePointFilter = Read-Host "SharePointパーミッションを表示しますか？(Y/N)"
+    $showSharePointPermissions = ($showSharePointFilter -eq "Y" -or $showSharePointFilter -eq "y")
+}
+
+# パーミッションをフィルタリング
+$filteredAppRoles = $appRoles
+if (-not $showSharePointPermissions) {
+    # SharePoint関連のパーミッションをフィルタリング
+    $filteredAppRoles = $appRoles | Where-Object {
+        -not ($_.DisplayName -like "*サイトコレクション*" -or
+             $_.DisplayName -like "*SharePoint*" -or
+             $_.Description -like "*SharePoint*" -or
+             $_.DisplayName -like "*Sites*")
+    }
+    Write-Log "SharePoint関連のパーミッションを除外しました" "INFO"
+}
+
+# シンプルに表示するための処理
+for ($i = 0; $i -lt $filteredAppRoles.Count; $i++) {
+    # 簡潔な表示用の説明文作成
+    $simplifiedDesc = $filteredAppRoles[$i].Description
+    if ($simplifiedDesc.Length -gt 60) {
+        $simplifiedDesc = $simplifiedDesc.Substring(0, 60) + "..."
     }
     
-    Write-Log "$($appRoles.Count) 個のAPIパーミッションが見つかりました" "INFO"
+    $appRoleOptions += "$($filteredAppRoles[$i].DisplayName) - $simplifiedDesc"
     
-    Write-Host "`n利用可能な API パーミッション:" -ForegroundColor Cyan
-    $appRoleOptions = @()
+    # 番号と名前を表示（常に表示）
+    Write-Host "$($i+1). $($filteredAppRoles[$i].DisplayName)" -ForegroundColor White
     
-    for ($i = 0; $i -lt $appRoles.Count; $i++) {
-        $appRoleOptions += "$($appRoles[$i].DisplayName) - $($appRoles[$i].Description)"
-        Write-Host "$($i+1). $($appRoles[$i].DisplayName)" -ForegroundColor White
-        Write-Host "   ID: $($appRoles[$i].Id)" -ForegroundColor Gray
-        Write-Host "   説明: $($appRoles[$i].Description)" -ForegroundColor Gray
-        Write-Host "   値: $($appRoles[$i].Value)`n" -ForegroundColor Gray
+    # 詳細情報は必要に応じて表示
+    if ($showDetailedInfo) {
+        Write-Host "   ID: $($filteredAppRoles[$i].Id)" -ForegroundColor Gray
+        Write-Host "   説明: $($filteredAppRoles[$i].Description)" -ForegroundColor Gray
+        Write-Host "   値: $($filteredAppRoles[$i].Value)" -ForegroundColor Gray
     }
     
-    $roleChoice = Show-Menu -Title "パーミッションを選択" -Options $appRoleOptions
-    
-    if ($roleChoice -eq "Q") {
-        Write-Log "ユーザーによってスクリプトが終了されました" "INFO"
-        exit 0
+    # 空行を入れる（詳細表示時のみ）
+    if ($showDetailedInfo) {
+        Write-Host ""
     }
-    
-    $selectedRole = $appRoles[$roleChoice]
-    Write-Log "パーミッション「$($selectedRole.DisplayName)」が選択されました" "INFO"
+}
+
+$roleChoice = Show-Menu -Title "パーミッションを選択" -Options $appRoleOptions
+
+if ($roleChoice -eq "Q") {
+    Write-Log "ユーザーによってスクリプトが終了されました" "INFO"
+    exit 0
+}
+
+$selectedRole = $filteredAppRoles[$roleChoice]
+Write-Log "パーミッション「$($selectedRole.DisplayName)」が選択されました" "INFO"
 }
 catch {
     Write-Log "APIパーミッションの取得中にエラーが発生しました: $_" "ERROR"
