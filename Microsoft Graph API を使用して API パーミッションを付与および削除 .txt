@@ -5,6 +5,7 @@ Microsoft Graph API を使用して API パーミッションを付与および�
 ✅ グローバル管理者であることを確認  
 ✅ 対象のシステム（OneDrive / Teams / EntraID / Exchange）の選択  
 ✅ 対象の API パーミッション ID（App Role ID）を自動取得  
+✅ 各システムに最適なパーミッションセットを一括付与（NEW!） 
 ✅ ユーザーの一覧表示（SAMACCOUNTNAME を表示）  
 ✅ ユーザーを選択し、API パーミッションを付与 / 削除  
 ✅ 詳細なエラーハンドリング
@@ -80,8 +81,10 @@ if (-not $targetUser) {
 }
 
 # 付与または削除を選択
-Write-Host "n1. API パーミッションを付与"
-Write-Host "2. API パーミッションを削除"
+Write-Host "n1. 最適なパーミッションセットを一括付与"
+Write-Host "2. 個別にパーミッションを付与"
+Write-Host "3. パーミッションを削除"
+Write-Host "4. 現在のパーミッション割り当てを表示"
 $action = Read-Host "番号を入力"
 
 # 付与または削除する API パーミッション ID を選択
@@ -124,9 +127,39 @@ Read-Host
 
 ## 💡 追加機能
 🔹 対象の API パーミッション ID を自動取得（手動で探す必要なし！）  
+🔹 各システムに最適なパーミッションセットを一括付与（複数パーミッションを一度に！）
 🔹 付与対象ユーザーの一覧表示（間違えないように）  
 🔹 詳細なエラーハンドリング（権限エラーや入力ミスを防ぐ）  
 🔹 API パーミッションの付与だけでなく、削除も可能！  
+
+---
+
+## 📊 システム別最適パーミッションセット
+
+### 1. OneDrive for Business
+- User.Read.All - ユーザー情報へのアクセス
+- Directory.Read.All - 組織構造情報へのアクセス 
+- Files.ReadWrite.All - OneDriveファイルの読み書き
+
+### 2. Microsoft Teams
+- User.Read.All - ユーザー情報へのアクセス
+- Directory.Read.All - 組織構造情報へのアクセス
+- Team.ReadWrite.All - Teams管理
+- Channel.ReadWrite.All - チャネル管理
+- Chat.ReadWrite.All - チャット管理
+
+### 3. Microsoft EntraID
+- User.Read.All - ユーザー情報へのアクセス
+- Directory.ReadWrite.All - ディレクトリデータの管理
+- Group.ReadWrite.All - グループ管理
+- RoleManagement.ReadWrite.Directory - ロール管理
+
+### 4. Exchange Online
+- User.Read.All - ユーザー情報へのアクセス
+- Directory.Read.All - 組織構造情報へのアクセス
+- Mail.ReadWrite.All - メール管理
+- MailboxSettings.ReadWrite - メールボックス設定管理
+- Calendars.ReadWrite.All - カレンダー管理
 
 ---
 
