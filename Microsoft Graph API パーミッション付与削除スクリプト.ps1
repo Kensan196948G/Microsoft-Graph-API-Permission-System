@@ -46,8 +46,6 @@ $logFile = Join-Path $PSScriptRoot "MicrosoftGraphLog.$($currentDateTime.ToStrin
 $detailedLogEnabled = $true
 $script:errorCount = 0
 $script:warningCount = 0
-$script:successCount = 0
-$script:skippedCount = 0
 $script:startTime = $currentDateTime
 
 function Write-Log {
@@ -151,53 +149,15 @@ function Write-ExecutionSummary {
 総実行時間: $($duration.ToString("hh\:mm\:ss\.fff"))
 エラー数: $script:errorCount
 警告数: $script:warningCount
-スキップ数: $($script:skippedCount)
-成功数: $($script:successCount)
-ログファイル: $logFile
 "@
     
     Write-Log $summary "INFO"
     
-    # ログをコンソールに表示してユーザーに確認させる
     if ($script:errorCount -gt 0) {
         Write-Log "エラーが発生しました。ログファイルを確認してください: $logFile" "WARNING"
     }
     else {
         Write-Log "処理が正常に完了しました。" "SUCCESS"
-    }
-    
-    # 重要：ログファイルが失われないように確実にフラッシュする
-    try {
-        # ログファイルのパスを表示して確認を容易にする
-        Write-Host "`n実況ログファイル: $logFile" -ForegroundColor Cyan
-        
-        # Windows資格情報の確保（SYSTEMリソースへのアクセス保証）
-        [System.IO.FileInfo]$fileInfo = Get-Item -Path $logFile -ErrorAction SilentlyContinue
-        if ($fileInfo) {
-            # ログファイルのプロパティを表示
-            Write-Host "  ログファイルサイズ: $([math]::Round($fileInfo.Length / 1KB, 2)) KB" -ForegroundColor Gray
-            Write-Host "  最終更新時刻: $($fileInfo.LastWriteTime)" -ForegroundColor Gray
-            
-            # ログファイルが正常に書き込まれているか確認
-            if ($fileInfo.Length -eq 0) {
-                Write-Host "  警告: ログファイルが空です。書き込みに問題が発生した可能性があります。" -ForegroundColor Red
-            }
-            else {
-                # ログの最終行を確認して処理が完了したことを確認
-                try {
-                    $lastLine = Get-Content -Path $logFile -Tail 1 -ErrorAction SilentlyContinue
-                    if ($lastLine -match "処理が正常に完了しました" -or $lastLine -match "実行サマリー") {
-                        Write-Host "  ログファイルの完全性が確認されました" -ForegroundColor Green
-                    }
-                }
-                catch {
-                    Write-Host "  ログファイルの読み取り中にエラーが発生しました: $_" -ForegroundColor Yellow
-                }
-            }
-        }
-    }
-    catch {
-        Write-Host "ログファイル情報の取得中にエラーが発生しました: $_" -ForegroundColor Red
     }
 }
 
@@ -483,60 +443,23 @@ function Select-TargetUsers {
                     return $null
                 }
                 
-                # 検索結果の件数を正確に表示
-                $foundUsersCount = if ($foundUsers -is [array]) { $foundUsers.Count } else { if ($foundUsers) { 1 } else { 0 } }
-                Write-Log "$foundUsersCount 人のユーザーが見つかりました" "INFO"
-                
-                # 検索結果がない場合の再確認
-                if ($foundUsersCount -eq 0) {
-                    Write-Log "検索条件「$searchQuery」に一致するユーザーが見つかりませんでした" "WARNING"
-                    return $null
-                }
-                
-                # 配列に確実に変換して処理（単一ユーザーの場合も配列として扱う）
-                if ($foundUsers -isnot [array]) {
-                    $foundUsers = @($foundUsers)
-                }
+                Write-Log "$($foundUsers.Count) 人のユーザーが見つかりました" "INFO"
                 
                 # より詳細な情報を表示するオプションリストを作成
-                $userOptions = @()
-                foreach ($user in $foundUsers) {
-                    $details = "$($user.DisplayName) ($($user.UserPrincipalName))"
+                $userOptions = $foundUsers | ForEach-Object {
+                    $details = "$($_.DisplayName) ($($_.UserPrincipalName))"
                     
                     # SAMアカウント名があれば追加
-                    if ($user.OnPremisesSamAccountName) {
-                        $details += " [SAM: $($user.OnPremisesSamAccountName)]"
+                    if ($_.OnPremisesSamAccountName) {
+                        $details += " [SAM: $($_.OnPremisesSamAccountName)]"
                     }
                     
                     # 姓名の情報を追加（表示名と異なる場合のみ）
-                    if ($user.GivenName -and $user.Surname -and "$($user.Surname) $($user.GivenName)" -ne $user.DisplayName) {
-                        $details += " - $($user.GivenName) $($user.Surname)"
+                    if ($_.GivenName -and $_.Surname -and "$($_.Surname) $($_.GivenName)" -ne $_.DisplayName) {
+                        $details += " - $($_.GivenName) $($_.Surname)"
                     }
                     
-                    $userOptions += $details
-                }
-                
-                # ユーザーオプションが見つからない場合の確認
-                if ($userOptions.Count -eq 0) {
-                    Write-Log "ユーザー情報の表示に失敗しました" "ERROR"
-                    return $null
-                }
-                
-                Write-Log "表示するユーザーオプション数: $($userOptions.Count)" "DEBUG" -NoConsole
-                
-                # 検索結果が1件のみの場合は自動選択のオプションを提供
-                if ($foundUsers.Count -eq 1) {
-                    Write-Host "`n検索条件に一致するユーザーが1名見つかりました:" -ForegroundColor Cyan
-                    Write-Host "  $($userOptions[0])" -ForegroundColor White
-                    
-                    $autoSelect = Read-Host "このユーザーを自動選択しますか？ (Y/N)"
-                    if ($autoSelect -eq "Y" -or $autoSelect -eq "y") {
-                        Write-Log "ユーザー「$($foundUsers[0].DisplayName)」を自動選択しました" "INFO"
-                        $selectedUsers = @($foundUsers[0])
-                        return $selectedUsers
-                    }
-                    # 自動選択しない場合は下記の通常選択プロセスに進む
-                    Write-Host "通常の選択プロセスに進みます" -ForegroundColor Yellow
+                    return $details
                 }
                 
                 if ($AllowMultiple) {
@@ -772,12 +695,49 @@ if (-not (Test-AdminRole)) {
     exit 1
 }
 
-# 対象のシステムを選択
+# 対象のシステムを選択（最適なパーミッションセットを定義）
 $systems = @(
-    @{ Name = "OneDrive for Business"; AppName = "Office 365 SharePoint Online" },
-    @{ Name = "Microsoft Teams"; AppName = "Microsoft Teams Services" },
-    @{ Name = "Microsoft EntraID"; AppName = "Microsoft Graph" },
-    @{ Name = "Exchange Online"; AppName = "Office 365 Exchange Online" }
+    @{ 
+        Name = "OneDrive for Business"; 
+        AppName = "Office 365 SharePoint Online";
+        OptimalPermissions = @(
+            @{ Name = "User.Read.All"; Description = "ユーザー情報へのアクセス" },
+            @{ Name = "Directory.Read.All"; Description = "組織構造情報へのアクセス" },
+            @{ Name = "Files.ReadWrite.All"; Description = "OneDriveファイルの読み書き" }
+        )
+    },
+    @{ 
+        Name = "Microsoft Teams"; 
+        AppName = "Microsoft Teams Services";
+        OptimalPermissions = @(
+            @{ Name = "User.Read.All"; Description = "ユーザー情報へのアクセス" },
+            @{ Name = "Directory.Read.All"; Description = "組織構造情報へのアクセス" },
+            @{ Name = "Team.ReadWrite.All"; Description = "Teams管理" },
+            @{ Name = "Channel.ReadWrite.All"; Description = "チャネル管理" },
+            @{ Name = "Chat.ReadWrite.All"; Description = "チャット管理" }
+        )
+    },
+    @{ 
+        Name = "Microsoft EntraID"; 
+        AppName = "Microsoft Graph";
+        OptimalPermissions = @(
+            @{ Name = "User.Read.All"; Description = "ユーザー情報へのアクセス" },
+            @{ Name = "Directory.ReadWrite.All"; Description = "ディレクトリデータの管理" },
+            @{ Name = "Group.ReadWrite.All"; Description = "グループ管理" },
+            @{ Name = "RoleManagement.ReadWrite.Directory"; Description = "ロール管理" }
+        )
+    },
+    @{ 
+        Name = "Exchange Online"; 
+        AppName = "Office 365 Exchange Online";
+        OptimalPermissions = @(
+            @{ Name = "User.Read.All"; Description = "ユーザー情報へのアクセス" },
+            @{ Name = "Directory.Read.All"; Description = "組織構造情報へのアクセス" },
+            @{ Name = "Mail.ReadWrite.All"; Description = "メール管理" },
+            @{ Name = "MailboxSettings.ReadWrite"; Description = "メールボックス設定管理" },
+            @{ Name = "Calendars.ReadWrite.All"; Description = "カレンダー管理" }
+        )
+    }
 )
 
 $systemOptions = $systems | ForEach-Object { $_.Name }
@@ -800,7 +760,8 @@ if (-not $servicePrincipal) {
 
 # アクションの選択
 $actionOptions = @(
-    "パーミッションを付与",
+    "最適なパーミッションセットを一括付与",
+    "個別にパーミッションを付与",
     "パーミッションを削除",
     "現在のパーミッション割り当てを表示"
 )
@@ -812,7 +773,7 @@ if ($actionChoice -eq "Q") {
 }
 
 # 現在のパーミッション割り当てを表示する場合
-if ($actionChoice -eq 2) {
+if ($actionChoice -eq 3) {
     try {
         Write-Log "現在のパーミッション割り当てを取得しています..." "INFO"
         
@@ -870,224 +831,438 @@ if ($actionChoice -eq 2) {
     }
 }
 
-# 利用可能な API パーミッション（App Role ID）の取得
-try {
-$appRoles = $servicePrincipal.AppRoles | Where-Object { $_.IsEnabled -eq $true } |
-            Select-Object DisplayName, Id, Description, Value
-
-if ($appRoles.Count -eq 0) {
-    Write-Log "利用可能なAPIパーミッションが見つかりませんでした" "ERROR"
-    exit 1
-}
-
-Write-Log "$($appRoles.Count) 個のAPIパーミッションが見つかりました" "INFO"
-
-# パーミッション表示の簡略化
-Write-Host "`n利用可能な API パーミッション:" -ForegroundColor Cyan
-$appRoleOptions = @()
-
-# 詳細情報フラグ
-$showDetailedInfo = $false
-if ($detailedLogEnabled) {
-    $showDetailInfo = Read-Host "パーミッションの詳細情報も表示しますか？(Y/N)"
-    $showDetailedInfo = ($showDetailInfo -eq "Y" -or $showDetailInfo -eq "y")
-}
-
-# SharePointフィルタリング
-$showSharePointPermissions = $true
-if ($selectedSystem.Name -eq "OneDrive for Business") {
-    $showSharePointFilter = Read-Host "SharePointパーミッションを表示しますか？(Y/N)"
-    $showSharePointPermissions = ($showSharePointFilter -eq "Y" -or $showSharePointFilter -eq "y")
-}
-
-# パーミッションをフィルタリング
-$filteredAppRoles = $appRoles
-if (-not $showSharePointPermissions) {
-    # SharePoint関連のパーミッションをフィルタリング
-    $filteredAppRoles = $appRoles | Where-Object {
-        -not ($_.DisplayName -like "*サイトコレクション*" -or
-             $_.DisplayName -like "*SharePoint*" -or
-             $_.Description -like "*SharePoint*" -or
-             $_.DisplayName -like "*Sites*")
-    }
-    Write-Log "SharePoint関連のパーミッションを除外しました" "INFO"
-}
-
-# シンプルに表示するための処理
-for ($i = 0; $i -lt $filteredAppRoles.Count; $i++) {
-    # 簡潔な表示用の説明文作成
-    $simplifiedDesc = $filteredAppRoles[$i].Description
-    if ($simplifiedDesc.Length -gt 60) {
-        $simplifiedDesc = $simplifiedDesc.Substring(0, 60) + "..."
-    }
-    
-    $appRoleOptions += "$($filteredAppRoles[$i].DisplayName) - $simplifiedDesc"
-    
-    # 番号と名前を表示（常に表示）
-    Write-Host "$($i+1). $($filteredAppRoles[$i].DisplayName)" -ForegroundColor White
-    
-    # 詳細情報は必要に応じて表示
-    if ($showDetailedInfo) {
-        Write-Host "   ID: $($filteredAppRoles[$i].Id)" -ForegroundColor Gray
-        Write-Host "   説明: $($filteredAppRoles[$i].Description)" -ForegroundColor Gray
-        Write-Host "   値: $($filteredAppRoles[$i].Value)" -ForegroundColor Gray
-    }
-    
-    # 空行を入れる（詳細表示時のみ）
-    if ($showDetailedInfo) {
-        Write-Host ""
-    }
-}
-
-$roleChoice = Show-Menu -Title "パーミッションを選択" -Options $appRoleOptions
-
-if ($roleChoice -eq "Q") {
-    Write-Log "ユーザーによってスクリプトが終了されました" "INFO"
-    exit 0
-}
-
-$selectedRole = $filteredAppRoles[$roleChoice]
-Write-Log "パーミッション「$($selectedRole.DisplayName)」が選択されました" "INFO"
-}
-catch {
-    Write-Log "APIパーミッションの取得中にエラーが発生しました: $_" "ERROR"
-    exit 1
-}
-
-# 複数ユーザー選択を許可するオプション
-$allowMultiple = $true
-
-# ターゲットユーザーの選択
-$targetUsers = Select-TargetUsers -AllowMultiple:$allowMultiple
-
-if (-not $targetUsers -or $targetUsers.Count -eq 0) {
-    Write-Log "ユーザーが選択されていないか、選択に失敗しました。スクリプトを終了します。" "WARNING"
-    exit 0
-}
-
-Write-Log "$($targetUsers.Count) 人のユーザーが選択されました" "INFO"
-
-# 処理の概要を表示
-Write-Host "`n以下の操作を実行します：" -ForegroundColor Cyan
-Write-Host "  システム: $($selectedSystem.Name)" -ForegroundColor White
-Write-Host "  パーミッション: $($selectedRole.DisplayName)" -ForegroundColor White
-Write-Host "  アクション: $($actionOptions[$actionChoice])" -ForegroundColor White
-Write-Host "  対象ユーザー数: $($targetUsers.Count)" -ForegroundColor White
-
-$confirmation = Read-Host "`n処理を続行しますか？(Y/N)"
-
-if ($confirmation -ne "Y" -and $confirmation -ne "y") {
-    Write-Log "ユーザーにより処理がキャンセルされました" "INFO"
-    exit 0
-}
-
-# バッチ処理の開始
-$successCount = 0
-$failureCount = 0
-$skippedCount = 0
-$errorDetails = @()
-$operationLog = @()
-
-Write-Log "バッチ処理を開始します。対象ユーザー数: $($targetUsers.Count)人" "INFO"
-Write-Log "処理内容: $($actionOptions[$actionChoice]) - $($selectedRole.DisplayName)" "INFO"
-
-foreach ($user in $targetUsers) {
-    $currentUserLog = @{
-        UserDisplayName = $user.DisplayName
-        UserPrincipalName = $user.UserPrincipalName
-        UserId = $user.Id
-        Action = $actionOptions[$actionChoice]
-        Permission = $selectedRole.DisplayName
-        Status = "処理中"
-        Timestamp = Get-Date
-        ErrorMessage = ""
-    }
-    
+# 一括パーミッション付与モード
+if ($actionChoice -eq 0) {
     try {
-        if ($actionChoice -eq 0) {  # パーミッションを付与
-            Write-Log "ユーザー「$($user.DisplayName)」にパーミッション「$($selectedRole.DisplayName)」を付与しています..." "INFO"
-            
-            # 既存の割り当てを確認
-            $existingAssignment = Get-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $servicePrincipal.Id -All |
-                                  Where-Object { $_.PrincipalId -eq $user.Id -and $_.AppRoleId -eq $selectedRole.Id }
-            
-            if ($existingAssignment) {
-                Write-Log "ユーザー「$($user.DisplayName)」には既にこのパーミッションが付与されています" "WARNING"
-                $currentUserLog.Status = "スキップ"
-                $currentUserLog.ErrorMessage = "既に権限が付与済み"
-                $skippedCount++
-                $script:skippedCount++
-                continue
-            }
-            
-            # API呼び出し時間を記録
-            $apiStartTime = Get-Date
-            
-            # パーミッション付与
-            New-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $servicePrincipal.Id `
-                -PrincipalId $user.Id `
-                -ResourceId $servicePrincipal.Id `
-                -AppRoleId $selectedRole.Id -ErrorAction Stop
-            
-            # API呼び出し時間を計測
-            $apiDuration = (Get-Date) - $apiStartTime
-            Write-Log "API呼び出し時間: $($apiDuration.TotalMilliseconds)ms" "VERBOSE" -NoConsole
-                
-            $successCount++
-            $script:successCount++
-            $currentUserLog.Status = "成功"
-            Write-Log "ユーザー「$($user.DisplayName)」へのパーミッション付与に成功しました" "SUCCESS"
+        Write-Log "最適なパーミッションセットを一括付与モードを開始します" "INFO"
+        
+        # 選択されたシステムの最適なパーミッションセットを取得
+        $optimalPermissions = $selectedSystem.OptimalPermissions
+        
+        if (-not $optimalPermissions -or $optimalPermissions.Count -eq 0) {
+            Write-Log "選択されたシステムの最適なパーミッションセットが定義されていません" "ERROR"
+            exit 1
         }
-        elseif ($actionChoice -eq 1) {  # パーミッションを削除
-            Write-Log "ユーザー「$($user.DisplayName)」からパーミッション「$($selectedRole.DisplayName)」を削除しています..." "INFO"
-            
-            # 既存の割り当てを確認
-            $existingAssignments = Get-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $servicePrincipal.Id -All |
-                                 Where-Object { $_.PrincipalId -eq $user.Id -and $_.AppRoleId -eq $selectedRole.Id }
-            
-            if (-not $existingAssignments -or $existingAssignments.Count -eq 0) {
-                Write-Log "ユーザー「$($user.DisplayName)」にはこのパーミッションが付与されていません" "WARNING"
-                $currentUserLog.Status = "スキップ"
-                $currentUserLog.ErrorMessage = "権限が付与されていない"
-                $skippedCount++
-                $script:skippedCount++
-                continue
-            }
-            
-            # API呼び出し時間を記録
-            $apiStartTime = Get-Date
-            
-            # 各割り当ての削除
-            foreach ($assignment in $existingAssignments) {
-                # パーミッション削除（AppRoleAssignmentId で識別）
-                Remove-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $servicePrincipal.Id `
-                    -AppRoleAssignmentId $assignment.Id -ErrorAction Stop
-            }
-            
-            # API呼び出し時間を計測
-            $apiDuration = (Get-Date) - $apiStartTime
-            Write-Log "API呼び出し時間: $($apiDuration.TotalMilliseconds)ms" "VERBOSE" -NoConsole
-                
-            $successCount++
-            $script:successCount++
-            $currentUserLog.Status = "成功"
-            Write-Log "ユーザー「$($user.DisplayName)」からのパーミッション削除に成功しました" "SUCCESS"
+        
+        Write-Log "$($selectedSystem.Name)の最適なパーミッションセット($($optimalPermissions.Count)個)を適用します" "INFO"
+        
+        # 全ての利用可能なパーミッションを取得
+        $appRoles = $servicePrincipal.AppRoles | Where-Object { $_.IsEnabled -eq $true } |
+                    Select-Object DisplayName, Id, Description, Value
+        
+        if ($appRoles.Count -eq 0) {
+            Write-Log "利用可能なAPIパーミッションが見つかりませんでした" "ERROR"
+            exit 1
         }
+        
+        # パーミッションセットを表示
+        Write-Host "`n$($selectedSystem.Name)の最適なパーミッションセット:" -ForegroundColor Cyan
+        for ($i = 0; $i -lt $optimalPermissions.Count; $i++) {
+            Write-Host "$($i+1). $($optimalPermissions[$i].Name) - $($optimalPermissions[$i].Description)" -ForegroundColor White
+        }
+        
+        # 該当するパーミッションIDを見つける
+        $selectedRoles = @()
+        $notFoundPermissions = @()
+        
+        foreach ($permission in $optimalPermissions) {
+            $found = $false
+            
+            # Value（パーミッション名）でマッチングを試みる
+            $role = $appRoles | Where-Object { $_.Value -eq $permission.Name }
+            
+            # DisplayName（表示名）でマッチングを試みる
+            if (-not $role) {
+                $role = $appRoles | Where-Object { $_.DisplayName -eq $permission.Name }
+            }
+            
+            if ($role) {
+                $selectedRoles += $role
+                $found = $true
+            } else {
+                $notFoundPermissions += $permission.Name
+            }
+        }
+        
+        # 見つからなかったパーミッションがあれば警告
+        if ($notFoundPermissions.Count -gt 0) {
+            Write-Log "警告: 以下のパーミッションが見つかりませんでした: $($notFoundPermissions -join ', ')" "WARNING"
+            Write-Host "`n以下のパーミッションは見つからなかったため、適用されません:" -ForegroundColor Yellow
+            foreach ($notFound in $notFoundPermissions) {
+                Write-Host "  - $notFound" -ForegroundColor Yellow
+            }
+            
+            $continue = Read-Host "`n見つかったパーミッションのみで続行しますか？ (Y/N)"
+            if ($continue -ne "Y" -and $continue -ne "y") {
+                Write-Log "ユーザーによって処理がキャンセルされました" "INFO"
+                exit 0
+            }
+        }
+        
+        if ($selectedRoles.Count -eq 0) {
+            Write-Log "適用できるパーミッションが見つかりませんでした" "ERROR"
+            exit 1
+        }
+        
+        Write-Log "$($selectedRoles.Count)個のパーミッションを適用します" "INFO"
+        
+        # 以降は複数ユーザー選択と付与処理に続く
     }
     catch {
-        $failureCount++
-        $currentUserLog.Status = "失敗"
-        $currentUserLog.ErrorMessage = $_.Exception.Message
-        
-        # 詳細なエラー情報を記録
-        Write-ErrorDetail $_ "ユーザー「$($user.DisplayName)」の処理中にエラーが発生しました"
-        
-        $errorDetails += "$($user.UserPrincipalName): $($_.Exception.Message)"
+        Write-Log "最適なパーミッションセットの処理中にエラーが発生しました: $_" "ERROR"
+        exit 1
+    }
+}
+# 個別パーミッション付与モード
+elseif ($actionChoice -eq 1) {
+    try {
+        $appRoles = $servicePrincipal.AppRoles | Where-Object { $_.IsEnabled -eq $true } |
+                    Select-Object DisplayName, Id, Description, Value
+
+        if ($appRoles.Count -eq 0) {
+            Write-Log "利用可能なAPIパーミッションが見つかりませんでした" "ERROR"
+            exit 1
+        }
+
+        Write-Log "$($appRoles.Count) 個のAPIパーミッションが見つかりました" "INFO"
+
+        # パーミッション表示の簡略化
+        Write-Host "`n利用可能な API パーミッション:" -ForegroundColor Cyan
+        $appRoleOptions = @()
+
+        # 詳細情報フラグ
+        $showDetailedInfo = $false
+        if ($detailedLogEnabled) {
+            $showDetailInfo = Read-Host "パーミッションの詳細情報も表示しますか？(Y/N)"
+            $showDetailedInfo = ($showDetailInfo -eq "Y" -or $showDetailInfo -eq "y")
+        }
+
+        # SharePointフィルタリング
+        $showSharePointPermissions = $true
+        if ($selectedSystem.Name -eq "OneDrive for Business") {
+            $showSharePointFilter = Read-Host "SharePointパーミッションを表示しますか？(Y/N)"
+            $showSharePointPermissions = ($showSharePointFilter -eq "Y" -or $showSharePointFilter -eq "y")
+        }
+
+        # パーミッションをフィルタリング
+        $filteredAppRoles = $appRoles
+        if (-not $showSharePointPermissions) {
+            # SharePoint関連のパーミッションをフィルタリング
+            $filteredAppRoles = $appRoles | Where-Object {
+                -not ($_.DisplayName -like "*サイトコレクション*" -or
+                     $_.DisplayName -like "*SharePoint*" -or
+                     $_.Description -like "*SharePoint*" -or
+                     $_.DisplayName -like "*Sites*")
+            }
+            Write-Log "SharePoint関連のパーミッションを除外しました" "INFO"
+        }
+
+        # シンプルに表示するための処理
+        for ($i = 0; $i -lt $filteredAppRoles.Count; $i++) {
+            # 簡潔な表示用の説明文作成
+            $simplifiedDesc = $filteredAppRoles[$i].Description
+            if ($simplifiedDesc.Length -gt 60) {
+                $simplifiedDesc = $simplifiedDesc.Substring(0, 60) + "..."
+            }
+            
+            $appRoleOptions += "$($filteredAppRoles[$i].DisplayName) - $simplifiedDesc"
+            
+            # 番号と名前を表示（常に表示）
+            Write-Host "$($i+1). $($filteredAppRoles[$i].DisplayName)" -ForegroundColor White
+            
+            # 詳細情報は必要に応じて表示
+            if ($showDetailedInfo) {
+                Write-Host "   ID: $($filteredAppRoles[$i].Id)" -ForegroundColor Gray
+                Write-Host "   説明: $($filteredAppRoles[$i].Description)" -ForegroundColor Gray
+                Write-Host "   値: $($filteredAppRoles[$i].Value)" -ForegroundColor Gray
+            }
+            
+            # 空行を入れる（詳細表示時のみ）
+            if ($showDetailedInfo) {
+                Write-Host ""
+            }
+        }
+
+        $roleChoice = Show-Menu -Title "パーミッションを選択" -Options $appRoleOptions
+
+        if ($roleChoice -eq "Q") {
+            Write-Log "ユーザーによってスクリプトが終了されました" "INFO"
+            exit 0
+        }
+
+        $selectedRoles = @($filteredAppRoles[$roleChoice])
+        Write-Log "パーミッション「$($selectedRoles[0].DisplayName)」が選択されました" "INFO"
+    }
+    catch {
+        Write-Log "APIパーミッションの取得中にエラーが発生しました: $_" "ERROR"
+        exit 1
+    }
+}
+# パーミッション削除モード
+elseif ($actionChoice -eq 2) {
+    try {
+        $appRoles = $servicePrincipal.AppRoles | Where-Object { $_.IsEnabled -eq $true } |
+                    Select-Object DisplayName, Id, Description, Value
+
+        if ($appRoles.Count -eq 0) {
+            Write-Log "利用可能なAPIパーミッションが見つかりませんでした" "ERROR"
+            exit 1
+        }
+
+        # パーミッション表示
+        Write-Host "`n削除可能な API パーミッション:" -ForegroundColor Cyan
+        $appRoleOptions = @()
+
+        for ($i = 0; $i -lt $appRoles.Count; $i++) {
+            $simplifiedDesc = $appRoles[$i].Description
+            if ($simplifiedDesc.Length -gt 60) {
+                $simplifiedDesc = $simplifiedDesc.Substring(0, 60) + "..."
+            }
+            
+            $appRoleOptions += "$($appRoles[$i].DisplayName) - $simplifiedDesc"
+            Write-Host "$($i+1). $($appRoles[$i].DisplayName)" -ForegroundColor White
+        }
+
+        $roleChoice = Show-Menu -Title "削除するパーミッションを選択" -Options $appRoleOptions
+
+        if ($roleChoice -eq "Q") {
+            Write-Log "ユーザーによってスクリプトが終了されました" "INFO"
+            exit 0
+        }
+
+        $selectedRoles = @($appRoles[$roleChoice])
+        Write-Log "削除するパーミッション「$($selectedRoles[0].DisplayName)」が選択されました" "INFO"
+    }
+    catch {
+        Write-Log "APIパーミッションの取得中にエラーが発生しました: $_" "ERROR"
+        exit 1
+    }
+}
+
+# ユーザー選択はアクションの種類に関わらず実行
+if ($actionChoice -ne 3) {  # 表示モード以外
+    # 複数ユーザー選択を許可するオプション
+    $allowMultiple = $true
+
+    # ターゲットユーザーの選択
+    $targetUsers = Select-TargetUsers -AllowMultiple:$allowMultiple
+
+    if (-not $targetUsers -or $targetUsers.Count -eq 0) {
+        Write-Log "ユーザーが選択されていないか、選択に失敗しました。スクリプトを終了します。" "WARNING"
+        exit 0
+    }
+
+    Write-Log "$($targetUsers.Count) 人のユーザーが選択されました" "INFO"
+
+    # 処理の概要を表示
+    Write-Host "`n以下の操作を実行します：" -ForegroundColor Cyan
+    Write-Host "  システム: $($selectedSystem.Name)" -ForegroundColor White
+    
+    if ($actionChoice -eq 0) {
+        Write-Host "  パーミッション: 最適なパーミッションセット($($selectedRoles.Count)個)" -ForegroundColor White
+        foreach ($role in $selectedRoles) {
+            Write-Host "    - $($role.DisplayName)" -ForegroundColor Gray
+        }
+    } else {
+        Write-Host "  パーミッション: $($selectedRoles[0].DisplayName)" -ForegroundColor White
     }
     
-    # 操作ログに追加
-    $operationLog += $currentUserLog
-}
+    Write-Host "  アクション: $($actionOptions[$actionChoice])" -ForegroundColor White
+    Write-Host "  対象ユーザー数: $($targetUsers.Count)" -ForegroundColor White
+
+    $confirmation = Read-Host "`n処理を続行しますか？(Y/N)"
+
+    if ($confirmation -ne "Y" -and $confirmation -ne "y") {
+        Write-Log "ユーザーにより処理がキャンセルされました" "INFO"
+        exit 0
+    }
+
+    # バッチ処理の開始
+    $successCount = 0
+    $failureCount = 0
+    $skippedCount = 0
+    $errorDetails = @()
+    $operationLog = @()
+
+    Write-Log "バッチ処理を開始します。対象ユーザー数: $($targetUsers.Count)人" "INFO"
+    
+    if ($actionChoice -eq 0) {
+        Write-Log "処理内容: $($actionOptions[$actionChoice]) - $($selectedRoles.Count)個のパーミッション" "INFO"
+    } else {
+        Write-Log "処理内容: $($actionOptions[$actionChoice]) - $($selectedRoles[0].DisplayName)" "INFO"
+    }
+
+    foreach ($user in $targetUsers) {
+        # 複数パーミッションのケース（一括付与モード）
+        if ($actionChoice -eq 0) {
+            $userSuccessCount = 0
+            $userSkippedCount = 0
+            $userFailureCount = 0
+            
+            Write-Log "ユーザー「$($user.DisplayName)」に対して処理を開始します..." "INFO"
+            
+            foreach ($role in $selectedRoles) {
+                $currentRoleLog = @{
+                    UserDisplayName = $user.DisplayName
+                    UserPrincipalName = $user.UserPrincipalName
+                    UserId = $user.Id
+                    Action = $actionOptions[$actionChoice]
+                    Permission = $role.DisplayName
+                    Status = "処理中"
+                    Timestamp = Get-Date
+                    ErrorMessage = ""
+                }
+                
+                try {
+                    Write-Log "  パーミッション「$($role.DisplayName)」を付与しています..." "INFO"
+                    
+                    # 既存の割り当てを確認
+                    $existingAssignment = Get-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $servicePrincipal.Id -All |
+                                          Where-Object { $_.PrincipalId -eq $user.Id -and $_.AppRoleId -eq $role.Id }
+                    
+                    if ($existingAssignment) {
+                        Write-Log "  ユーザー「$($user.DisplayName)」には既にパーミッション「$($role.DisplayName)」が付与されています" "WARNING"
+                        $currentRoleLog.Status = "スキップ"
+                        $currentRoleLog.ErrorMessage = "既に権限が付与済み"
+                        $userSkippedCount++
+                        $skippedCount++
+                        continue
+                    }
+                    
+                    # API呼び出し時間を記録
+                    $apiStartTime = Get-Date
+                    
+                    # パーミッション付与
+                    New-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $servicePrincipal.Id `
+                        -PrincipalId $user.Id `
+                        -ResourceId $servicePrincipal.Id `
+                        -AppRoleId $role.Id -ErrorAction Stop
+                    
+                    # API呼び出し時間を計測
+                    $apiDuration = (Get-Date) - $apiStartTime
+                    Write-Log "  API呼び出し時間: $($apiDuration.TotalMilliseconds)ms" "VERBOSE" -NoConsole
+                        
+                    $userSuccessCount++
+                    $successCount++
+                    $currentRoleLog.Status = "成功"
+                    Write-Log "  パーミッション「$($role.DisplayName)」の付与に成功しました" "SUCCESS"
+                }
+                catch {
+                    $userFailureCount++
+                    $failureCount++
+                    $currentRoleLog.Status = "失敗"
+                    $currentRoleLog.ErrorMessage = $_.Exception.Message
+                    
+                    # 詳細なエラー情報を記録
+                    Write-ErrorDetail $_ "ユーザー「$($user.DisplayName)」のパーミッション「$($role.DisplayName)」付与中にエラー"
+                    
+                    $errorDetails += "$($user.UserPrincipalName) - $($role.DisplayName): $($_.Exception.Message)"
+                }
+                
+                # 操作ログに追加
+                $operationLog += $currentRoleLog
+            }
+            
+            # ユーザーごとのサマリー
+            Write-Log "ユーザー「$($user.DisplayName)」の処理完了。成功: $userSuccessCount, スキップ: $userSkippedCount, 失敗: $userFailureCount" "INFO"
+        }
+        # 単一パーミッションのケース（個別付与または削除モード）
+        else {
+            $currentUserLog = @{
+                UserDisplayName = $user.DisplayName
+                UserPrincipalName = $user.UserPrincipalName
+                UserId = $user.Id
+                Action = $actionOptions[$actionChoice]
+                Permission = $selectedRoles[0].DisplayName
+                Status = "処理中"
+                Timestamp = Get-Date
+                ErrorMessage = ""
+            }
+            
+            try {
+                if ($actionChoice -eq 1) {  # 個別パーミッション付与
+                    Write-Log "ユーザー「$($user.DisplayName)」にパーミッション「$($selectedRoles[0].DisplayName)」を付与しています..." "INFO"
+                    
+                    # 既存の割り当てを確認
+                    $existingAssignment = Get-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $servicePrincipal.Id -All |
+                                          Where-Object { $_.PrincipalId -eq $user.Id -and $_.AppRoleId -eq $selectedRoles[0].Id }
+                    
+                    if ($existingAssignment) {
+                        Write-Log "ユーザー「$($user.DisplayName)」には既にこのパーミッションが付与されています" "WARNING"
+                        $currentUserLog.Status = "スキップ"
+                        $currentUserLog.ErrorMessage = "既に権限が付与済み"
+                        $skippedCount++
+                        continue
+                    }
+                    
+                    # API呼び出し時間を記録
+                    $apiStartTime = Get-Date
+                    
+                    # パーミッション付与
+                    New-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $servicePrincipal.Id `
+                        -PrincipalId $user.Id `
+                        -ResourceId $servicePrincipal.Id `
+                        -AppRoleId $selectedRoles[0].Id -ErrorAction Stop
+                    
+                    # API呼び出し時間を計測
+                    $apiDuration = (Get-Date) - $apiStartTime
+                    Write-Log "API呼び出し時間: $($apiDuration.TotalMilliseconds)ms" "VERBOSE" -NoConsole
+                        
+                    $successCount++
+                    $currentUserLog.Status = "成功"
+                    Write-Log "ユーザー「$($user.DisplayName)」へのパーミッション付与に成功しました" "SUCCESS"
+                }
+                elseif ($actionChoice -eq 2) {  # パーミッション削除
+                    Write-Log "ユーザー「$($user.DisplayName)」からパーミッション「$($selectedRoles[0].DisplayName)」を削除しています..." "INFO"
+                    
+                    # 既存の割り当てを確認
+                    $existingAssignments = Get-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $servicePrincipal.Id -All |
+                                         Where-Object { $_.PrincipalId -eq $user.Id -and $_.AppRoleId -eq $selectedRoles[0].Id }
+                    
+                    if (-not $existingAssignments -or $existingAssignments.Count -eq 0) {
+                        Write-Log "ユーザー「$($user.DisplayName)」にはこのパーミッションが付与されていません" "WARNING"
+                        $currentUserLog.Status = "スキップ"
+                        $currentUserLog.ErrorMessage = "権限が付与されていない"
+                        $skippedCount++
+                        continue
+                    }
+                    
+                    # API呼び出し時間を記録
+                    $apiStartTime = Get-Date
+                    
+                    # 各割り当ての削除
+                    foreach ($assignment in $existingAssignments) {
+                        # パーミッション削除（AppRoleAssignmentId で識別）
+                        Remove-MgServicePrincipalAppRoleAssignedTo -ServicePrincipalId $servicePrincipal.Id `
+                            -AppRoleAssignmentId $assignment.Id -ErrorAction Stop
+                    }
+                    
+                    # API呼び出し時間を計測
+                    $apiDuration = (Get-Date) - $apiStartTime
+                    Write-Log "API呼び出し時間: $($apiDuration.TotalMilliseconds)ms" "VERBOSE" -NoConsole
+                        
+                    $successCount++
+                    $currentUserLog.Status = "成功"
+                    Write-Log "ユーザー「$($user.DisplayName)」からのパーミッション削除に成功しました" "SUCCESS"
+                }
+            }
+            catch {
+                $failureCount++
+                $currentUserLog.Status = "失敗"
+                $currentUserLog.ErrorMessage = $_.Exception.Message
+                
+                # 詳細なエラー情報を記録
+                Write-ErrorDetail $_ "ユーザー「$($user.DisplayName)」の処理中にエラーが発生しました"
+                
+                $errorDetails += "$($user.UserPrincipalName): $($_.Exception.Message)"
+            }
+            
+            # 操作ログに追加
+            $operationLog += $currentUserLog
+        }
+    }
+
+# この部分は削除 - 既に上部の修正部分に含まれているため不要
 
 # 詳細な操作ログをファイルに記録
 $operationLogContent = "==== 操作詳細ログ ====`n"
@@ -1109,6 +1284,8 @@ foreach ($entry in $operationLog) {
 
 # 操作ログをファイルに記録
 Write-Log $operationLogContent "VERBOSE" -NoConsole
+
+}  # <-- この閉じる中括弧が不足していました
 
 # 処理結果の表示
 Write-Host "`n処理結果サマリー:" -ForegroundColor Cyan
@@ -1160,16 +1337,7 @@ Write-Log "処理総合結果: $resultStatus" $(if ($failureCount -gt 0) { "WARN
 # スクリプト終了
 Write-Host "`n処理が完了しました。" -ForegroundColor Cyan
 Write-Host "実況ログは次の場所に保存されました: $logFile" -ForegroundColor Cyan
-Write-Host "----------------------------------------------------------------------------" -ForegroundColor DarkGray
-Write-Host " ログファイル名: $(Split-Path $logFile -Leaf)" -ForegroundColor White
-Write-Host " 保存場所: $(Split-Path $logFile -Parent)" -ForegroundColor White
-Write-Host " ファイル形式: UTF-8 テキスト（メモ帳で開けます）" -ForegroundColor White
-Write-Host "----------------------------------------------------------------------------" -ForegroundColor DarkGray
-Write-Host "ログには以下の情報が含まれています:" -ForegroundColor White
-Write-Host "  • すべての処理ステップとその結果" -ForegroundColor White
-Write-Host "  • エラーが発生した場合の詳細なトレース情報" -ForegroundColor White
-Write-Host "  • API呼び出しの詳細（DEBUG モード時）" -ForegroundColor White
-Write-Host "  • 実行環境の情報（エラー発生時）" -ForegroundColor White
+Write-Host "詳細な情報やエラー内容もログファイルに記録されています。" -ForegroundColor White
 Write-Host "Enterキーを押して終了してください..." -ForegroundColor Cyan
 Read-Host
 
