@@ -46,6 +46,8 @@ $logFile = Join-Path $PSScriptRoot "MicrosoftGraphLog.$($currentDateTime.ToStrin
 $detailedLogEnabled = $true
 $script:errorCount = 0
 $script:warningCount = 0
+$script:successCount = 0
+$script:skippedCount = 0
 $script:startTime = $currentDateTime
 
 function Write-Log {
@@ -149,15 +151,53 @@ function Write-ExecutionSummary {
 総実行時間: $($duration.ToString("hh\:mm\:ss\.fff"))
 エラー数: $script:errorCount
 警告数: $script:warningCount
+スキップ数: $($script:skippedCount)
+成功数: $($script:successCount)
+ログファイル: $logFile
 "@
     
     Write-Log $summary "INFO"
     
+    # ログをコンソールに表示してユーザーに確認させる
     if ($script:errorCount -gt 0) {
         Write-Log "エラーが発生しました。ログファイルを確認してください: $logFile" "WARNING"
     }
     else {
         Write-Log "処理が正常に完了しました。" "SUCCESS"
+    }
+    
+    # 重要：ログファイルが失われないように確実にフラッシュする
+    try {
+        # ログファイルのパスを表示して確認を容易にする
+        Write-Host "`n実況ログファイル: $logFile" -ForegroundColor Cyan
+        
+        # Windows資格情報の確保（SYSTEMリソースへのアクセス保証）
+        [System.IO.FileInfo]$fileInfo = Get-Item -Path $logFile -ErrorAction SilentlyContinue
+        if ($fileInfo) {
+            # ログファイルのプロパティを表示
+            Write-Host "  ログファイルサイズ: $([math]::Round($fileInfo.Length / 1KB, 2)) KB" -ForegroundColor Gray
+            Write-Host "  最終更新時刻: $($fileInfo.LastWriteTime)" -ForegroundColor Gray
+            
+            # ログファイルが正常に書き込まれているか確認
+            if ($fileInfo.Length -eq 0) {
+                Write-Host "  警告: ログファイルが空です。書き込みに問題が発生した可能性があります。" -ForegroundColor Red
+            }
+            else {
+                # ログの最終行を確認して処理が完了したことを確認
+                try {
+                    $lastLine = Get-Content -Path $logFile -Tail 1 -ErrorAction SilentlyContinue
+                    if ($lastLine -match "処理が正常に完了しました" -or $lastLine -match "実行サマリー") {
+                        Write-Host "  ログファイルの完全性が確認されました" -ForegroundColor Green
+                    }
+                }
+                catch {
+                    Write-Host "  ログファイルの読み取り中にエラーが発生しました: $_" -ForegroundColor Yellow
+                }
+            }
+        }
+    }
+    catch {
+        Write-Host "ログファイル情報の取得中にエラーが発生しました: $_" -ForegroundColor Red
     }
 }
 
@@ -443,23 +483,60 @@ function Select-TargetUsers {
                     return $null
                 }
                 
-                Write-Log "$($foundUsers.Count) 人のユーザーが見つかりました" "INFO"
+                # 検索結果の件数を正確に表示
+                $foundUsersCount = if ($foundUsers -is [array]) { $foundUsers.Count } else { if ($foundUsers) { 1 } else { 0 } }
+                Write-Log "$foundUsersCount 人のユーザーが見つかりました" "INFO"
+                
+                # 検索結果がない場合の再確認
+                if ($foundUsersCount -eq 0) {
+                    Write-Log "検索条件「$searchQuery」に一致するユーザーが見つかりませんでした" "WARNING"
+                    return $null
+                }
+                
+                # 配列に確実に変換して処理（単一ユーザーの場合も配列として扱う）
+                if ($foundUsers -isnot [array]) {
+                    $foundUsers = @($foundUsers)
+                }
                 
                 # より詳細な情報を表示するオプションリストを作成
-                $userOptions = $foundUsers | ForEach-Object {
-                    $details = "$($_.DisplayName) ($($_.UserPrincipalName))"
+                $userOptions = @()
+                foreach ($user in $foundUsers) {
+                    $details = "$($user.DisplayName) ($($user.UserPrincipalName))"
                     
                     # SAMアカウント名があれば追加
-                    if ($_.OnPremisesSamAccountName) {
-                        $details += " [SAM: $($_.OnPremisesSamAccountName)]"
+                    if ($user.OnPremisesSamAccountName) {
+                        $details += " [SAM: $($user.OnPremisesSamAccountName)]"
                     }
                     
                     # 姓名の情報を追加（表示名と異なる場合のみ）
-                    if ($_.GivenName -and $_.Surname -and "$($_.Surname) $($_.GivenName)" -ne $_.DisplayName) {
-                        $details += " - $($_.GivenName) $($_.Surname)"
+                    if ($user.GivenName -and $user.Surname -and "$($user.Surname) $($user.GivenName)" -ne $user.DisplayName) {
+                        $details += " - $($user.GivenName) $($user.Surname)"
                     }
                     
-                    return $details
+                    $userOptions += $details
+                }
+                
+                # ユーザーオプションが見つからない場合の確認
+                if ($userOptions.Count -eq 0) {
+                    Write-Log "ユーザー情報の表示に失敗しました" "ERROR"
+                    return $null
+                }
+                
+                Write-Log "表示するユーザーオプション数: $($userOptions.Count)" "DEBUG" -NoConsole
+                
+                # 検索結果が1件のみの場合は自動選択のオプションを提供
+                if ($foundUsers.Count -eq 1) {
+                    Write-Host "`n検索条件に一致するユーザーが1名見つかりました:" -ForegroundColor Cyan
+                    Write-Host "  $($userOptions[0])" -ForegroundColor White
+                    
+                    $autoSelect = Read-Host "このユーザーを自動選択しますか？ (Y/N)"
+                    if ($autoSelect -eq "Y" -or $autoSelect -eq "y") {
+                        Write-Log "ユーザー「$($foundUsers[0].DisplayName)」を自動選択しました" "INFO"
+                        $selectedUsers = @($foundUsers[0])
+                        return $selectedUsers
+                    }
+                    # 自動選択しない場合は下記の通常選択プロセスに進む
+                    Write-Host "通常の選択プロセスに進みます" -ForegroundColor Yellow
                 }
                 
                 if ($AllowMultiple) {
@@ -939,6 +1016,7 @@ foreach ($user in $targetUsers) {
                 $currentUserLog.Status = "スキップ"
                 $currentUserLog.ErrorMessage = "既に権限が付与済み"
                 $skippedCount++
+                $script:skippedCount++
                 continue
             }
             
@@ -956,6 +1034,7 @@ foreach ($user in $targetUsers) {
             Write-Log "API呼び出し時間: $($apiDuration.TotalMilliseconds)ms" "VERBOSE" -NoConsole
                 
             $successCount++
+            $script:successCount++
             $currentUserLog.Status = "成功"
             Write-Log "ユーザー「$($user.DisplayName)」へのパーミッション付与に成功しました" "SUCCESS"
         }
@@ -971,6 +1050,7 @@ foreach ($user in $targetUsers) {
                 $currentUserLog.Status = "スキップ"
                 $currentUserLog.ErrorMessage = "権限が付与されていない"
                 $skippedCount++
+                $script:skippedCount++
                 continue
             }
             
@@ -989,6 +1069,7 @@ foreach ($user in $targetUsers) {
             Write-Log "API呼び出し時間: $($apiDuration.TotalMilliseconds)ms" "VERBOSE" -NoConsole
                 
             $successCount++
+            $script:successCount++
             $currentUserLog.Status = "成功"
             Write-Log "ユーザー「$($user.DisplayName)」からのパーミッション削除に成功しました" "SUCCESS"
         }
@@ -1079,7 +1160,16 @@ Write-Log "処理総合結果: $resultStatus" $(if ($failureCount -gt 0) { "WARN
 # スクリプト終了
 Write-Host "`n処理が完了しました。" -ForegroundColor Cyan
 Write-Host "実況ログは次の場所に保存されました: $logFile" -ForegroundColor Cyan
-Write-Host "詳細な情報やエラー内容もログファイルに記録されています。" -ForegroundColor White
+Write-Host "----------------------------------------------------------------------------" -ForegroundColor DarkGray
+Write-Host " ログファイル名: $(Split-Path $logFile -Leaf)" -ForegroundColor White
+Write-Host " 保存場所: $(Split-Path $logFile -Parent)" -ForegroundColor White
+Write-Host " ファイル形式: UTF-8 テキスト（メモ帳で開けます）" -ForegroundColor White
+Write-Host "----------------------------------------------------------------------------" -ForegroundColor DarkGray
+Write-Host "ログには以下の情報が含まれています:" -ForegroundColor White
+Write-Host "  • すべての処理ステップとその結果" -ForegroundColor White
+Write-Host "  • エラーが発生した場合の詳細なトレース情報" -ForegroundColor White
+Write-Host "  • API呼び出しの詳細（DEBUG モード時）" -ForegroundColor White
+Write-Host "  • 実行環境の情報（エラー発生時）" -ForegroundColor White
 Write-Host "Enterキーを押して終了してください..." -ForegroundColor Cyan
 Read-Host
 
