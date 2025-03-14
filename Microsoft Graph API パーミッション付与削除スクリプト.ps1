@@ -443,9 +443,9 @@ function Select-TargetUsers {
                     return $null
                 }
                 
-                # ユーザー数を明示的に変数に格納してからログ出力
-                $foundUserCount = $foundUsers.Count
-                Write-Log "$foundUserCount 人のユーザーが見つかりました" "INFO"
+                # 明示的に文字列連結を行う
+                [string]$userCountMessage = "$($foundUsers.Count) 人のユーザーが見つかりました"
+                Write-Log $userCountMessage "INFO"
                 
                 # より詳細な情報を表示するオプションリストを作成
                 $userOptions = $foundUsers | ForEach-Object {
@@ -464,10 +464,11 @@ function Select-TargetUsers {
                     return $details
                 }
                 
-                # ユーザーが1人しかいない場合は条件を先に確認
-                if ($foundUserCount -eq 1) {
-                    Write-Log "検索結果が1件のみのため、自動的に選択します: $($foundUsers[0].DisplayName)" "INFO"
-                    $selectedUsers = @($foundUsers[0])
+                # ユーザーが1人の場合は、自動選択する（即時実行）
+                if ($foundUsers.Count -eq 1) {
+                    $userDisplayName = $foundUsers[0].DisplayName
+                    Write-Log "検索結果が1件のみのため、自動的に選択します: $userDisplayName" "INFO"
+                    return @($foundUsers[0])  # 即時returnで確実に選択
                 }
                 # 複数ユーザーが見つかった場合の分岐処理
                 elseif ($AllowMultiple) {
