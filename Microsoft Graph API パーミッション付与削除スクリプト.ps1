@@ -443,7 +443,9 @@ function Select-TargetUsers {
                     return $null
                 }
                 
-                Write-Log "$($foundUsers.Count) 人のユーザーが見つかりました" "INFO"
+                # ユーザー数を明示的に変数に格納してからログ出力
+                $foundUserCount = $foundUsers.Count
+                Write-Log "$foundUserCount 人のユーザーが見つかりました" "INFO"
                 
                 # より詳細な情報を表示するオプションリストを作成
                 $userOptions = $foundUsers | ForEach-Object {
@@ -462,7 +464,13 @@ function Select-TargetUsers {
                     return $details
                 }
                 
-                if ($AllowMultiple) {
+                # ユーザーが1人しかいない場合は条件を先に確認
+                if ($foundUserCount -eq 1) {
+                    Write-Log "検索結果が1件のみのため、自動的に選択します: $($foundUsers[0].DisplayName)" "INFO"
+                    $selectedUsers = @($foundUsers[0])
+                }
+                # 複数ユーザーが見つかった場合の分岐処理
+                elseif ($AllowMultiple) {
                     # 複数ユーザー選択
                     Write-Host "`n複数のユーザーを選択できます。選択を終了するには 'done' と入力してください。"
                     
@@ -491,7 +499,7 @@ function Select-TargetUsers {
                     } while ($true)
                 }
                 else {
-                    # 単一ユーザー選択
+                    # 単一ユーザー選択（1件の場合は既に上で処理済み）
                     $userChoice = Show-Menu -Title "ユーザーを選択" -Options $userOptions
                     if ($userChoice -eq "Q") { return $null }
                     $selectedUsers = @($foundUsers[$userChoice])
@@ -699,22 +707,22 @@ if (-not (Test-AdminRole)) {
 $systems = @(
     @{ 
         Name = "OneDrive for Business"; 
-        AppName = "Office 365 SharePoint Online";
+        AppName = "Microsoft Graph"; # Office 365 SharePoint OnlineからMicrosoft Graphに変更
         OptimalPermissions = @(
-            @{ Name = "User.Read.All"; Description = "ユーザー情報へのアクセス" },
-            @{ Name = "Directory.Read.All"; Description = "組織構造情報へのアクセス" },
-            @{ Name = "Files.ReadWrite.All"; Description = "OneDriveファイルの読み書き" }
+            @{ Name = "User.Read.All"; Description = "ユーザー情報へのアクセス"; AlternativeNames = @("User.Read", "User.ReadBasic.All") },
+            @{ Name = "Directory.Read.All"; Description = "組織構造情報へのアクセス"; AlternativeNames = @("Directory.AccessAsUser.All", "Organization.Read.All") },
+            @{ Name = "Files.ReadWrite.All"; Description = "OneDriveファイルの読み書き"; AlternativeNames = @("Sites.ReadWrite.All", "AllSites.Write") }
         )
     },
     @{ 
         Name = "Microsoft Teams"; 
         AppName = "Microsoft Teams Services";
         OptimalPermissions = @(
-            @{ Name = "User.Read.All"; Description = "ユーザー情報へのアクセス" },
-            @{ Name = "Directory.Read.All"; Description = "組織構造情報へのアクセス" },
-            @{ Name = "Team.ReadWrite.All"; Description = "Teams管理" },
-            @{ Name = "Channel.ReadWrite.All"; Description = "チャネル管理" },
-            @{ Name = "Chat.ReadWrite.All"; Description = "チャット管理" }
+            @{ Name = "User.Read.All"; Description = "ユーザー情報へのアクセス"; AlternativeNames = @("User.Read", "User.ReadBasic.All") },
+            @{ Name = "Directory.Read.All"; Description = "組織構造情報へのアクセス"; AlternativeNames = @("Directory.AccessAsUser.All", "Organization.Read.All") },
+            @{ Name = "Team.ReadWrite.All"; Description = "Teams管理"; AlternativeNames = @() },
+            @{ Name = "Channel.ReadWrite.All"; Description = "チャネル管理"; AlternativeNames = @() },
+            @{ Name = "Chat.ReadWrite.All"; Description = "チャット管理"; AlternativeNames = @() }
         )
     },
     @{ 
@@ -871,9 +879,32 @@ if ($actionChoice -eq 0) {
             # Value（パーミッション名）でマッチングを試みる
             $role = $appRoles | Where-Object { $_.Value -eq $permission.Name }
             
+            # 代替名でマッチングを試みる
+            if (-not $role -and $permission.PSObject.Properties.Name -contains "AlternativeNames") {
+                foreach ($altName in $permission.AlternativeNames) {
+                    $role = $appRoles | Where-Object { $_.Value -eq $altName }
+                    if ($role) { 
+                        Write-Log "代替パーミッション名「$altName」でマッチしました" "DEBUG" -NoConsole
+                        break 
+                    }
+                }
+            }
+            
             # DisplayName（表示名）でマッチングを試みる
             if (-not $role) {
                 $role = $appRoles | Where-Object { $_.DisplayName -eq $permission.Name }
+            }
+            
+            # 部分一致でマッチングを試みる（最終手段）
+            if (-not $role) {
+                $role = $appRoles | Where-Object { 
+                    $_.Value -like "*$($permission.Name)*" -or 
+                    $_.DisplayName -like "*$($permission.Name)*" 
+                } | Select-Object -First 1
+                
+                if ($role) {
+                    Write-Log "部分一致でパーミッション「$($permission.Name)」を「$($role.Value)」にマッピングしました" "DEBUG" -NoConsole
+                }
             }
             
             if ($role) {
