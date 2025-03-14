@@ -393,6 +393,7 @@ function Select-TargetUsers {
                 # API経由で検索可能な属性を検索
                 foreach ($attr in $searchAttributes) {
                     try {
+                        # Microsoft Graph APIは前方一致検索のみサポート
                         Write-Log "$($attr.Name)で検索中..." "DEBUG" -NoConsole
                         $filter = "startswith($($attr.Field),'$searchQuery')"
                         $users = Get-MgUser -Filter $filter -Top 10 -Property DisplayName, UserPrincipalName, Id, OnPremisesSamAccountName, GivenName, Surname -ErrorAction Stop
@@ -413,20 +414,38 @@ function Select-TargetUsers {
                 try {
                     Write-Log "SAMアカウント名を含む追加検索を実行中..." "DEBUG" -NoConsole
                     
-                    # まず、APIでの検索結果数が少ない場合に限りすべてのユーザーを取得
-                    if ($foundUsers.Count -lt 5) {
-                        # 追加の属性を含む検索（具体的な属性を用いて検索）
-                        $allUsers = Get-MgUser -Top 100 -Property DisplayName, UserPrincipalName, Id, OnPremisesSamAccountName, GivenName, Surname -ErrorAction Stop
-                        
-                        # SAMアカウント名でフィルタリング（PowerShellクライアント側）
-                        $samUsers = $allUsers | Where-Object {
-                            $_.OnPremisesSamAccountName -and $_.OnPremisesSamAccountName.StartsWith($searchQuery)
-                        }
-                        
-                        if ($samUsers -and $samUsers.Count -gt 0) {
-                            Write-Log "SAMアカウント名での検索で $($samUsers.Count) 件ヒットしました" "DEBUG" -NoConsole
-                            $foundUsers += $samUsers
-                        }
+                    # 詳細検索のためにすべてのユーザーを取得（最大100人）
+                    # 注意: 大規模な組織では全ユーザーを取得できない可能性がある
+                    $allUsers = Get-MgUser -Top 100 -Property DisplayName, UserPrincipalName, Id, OnPremisesSamAccountName, GivenName, Surname -ErrorAction Stop
+                    Write-Log "詳細検索のためにユーザーを取得しました（最大100人）" "DEBUG" -NoConsole
+                    
+                    # クライアント側で複数条件の検索を実行（SAMアカウント名、表示名など）
+                    $clientFilteredUsers = $allUsers | Where-Object {
+                        # SAMアカウント名での検索
+                        ($_.OnPremisesSamAccountName -and (
+                            $_.OnPremisesSamAccountName -eq $searchQuery -or                      # 完全一致
+                            $_.OnPremisesSamAccountName.StartsWith($searchQuery) -or              # 前方一致
+                            $_.OnPremisesSamAccountName.ToLower().Contains($searchQuery.ToLower()) # 部分一致（大文字小文字区別なし）
+                        )) -or
+                        # 表示名での検索
+                        ($_.DisplayName -and (
+                            $_.DisplayName -eq $searchQuery -or                      # 完全一致
+                            $_.DisplayName.ToLower().Contains($searchQuery.ToLower()) # 部分一致（大文字小文字区別なし）
+                        )) -or 
+                        # メールアドレスでの検索（UPNの@より前の部分）
+                        ($_.UserPrincipalName -and (
+                            ($_.UserPrincipalName.Split('@').Length -gt 0 -and
+                             $_.UserPrincipalName.Split('@')[0].ToLower().Contains($searchQuery.ToLower())) # ドメイン前の部分で部分一致
+                        )) -or
+                        # 名前での検索
+                        ($_.GivenName -and $_.GivenName.ToLower().Contains($searchQuery.ToLower())) -or
+                        # 姓での検索
+                        ($_.Surname -and $_.Surname.ToLower().Contains($searchQuery.ToLower()))
+                    }
+                    
+                    if ($clientFilteredUsers -and $clientFilteredUsers.Count -gt 0) {
+                        Write-Log "クライアント側の詳細検索で $($clientFilteredUsers.Count) 件ヒットしました" "DEBUG" -NoConsole
+                        $foundUsers += $clientFilteredUsers
                     }
                 }
                 catch {
@@ -443,9 +462,20 @@ function Select-TargetUsers {
                     return $null
                 }
                 
-                # 明示的に文字列連結を行う
-                [string]$userCountMessage = "$($foundUsers.Count) 人のユーザーが見つかりました"
-                Write-Log $userCountMessage "INFO"
+                # 見つかったユーザー数の変数
+                $userCount = $foundUsers.Count
+                
+                # 完全に別の変数として作成
+                $countMessage = [string]::Format("{0} 人のユーザーが見つかりました", $userCount)
+                Write-Log $countMessage "INFO"
+                
+                # ユーザーが1人の場合は、後続処理を一切スキップして即時リターン
+                if ($userCount -eq 1) {
+                    $singleUser = $foundUsers[0]
+                    $userName = $singleUser.DisplayName
+                    Write-Log "検索結果が1件のみのため、自動的に選択します: $userName" "INFO"
+                    return @($singleUser)
+                }
                 
                 # より詳細な情報を表示するオプションリストを作成
                 $userOptions = $foundUsers | ForEach-Object {
@@ -463,47 +493,42 @@ function Select-TargetUsers {
                     
                     return $details
                 }
-                
-                # ユーザーが1人の場合は、自動選択する（即時実行）
-                if ($foundUsers.Count -eq 1) {
-                    $userDisplayName = $foundUsers[0].DisplayName
-                    Write-Log "検索結果が1件のみのため、自動的に選択します: $userDisplayName" "INFO"
-                    return @($foundUsers[0])  # 即時returnで確実に選択
-                }
-                # 複数ユーザーが見つかった場合の分岐処理
-                elseif ($AllowMultiple) {
-                    # 複数ユーザー選択
-                    Write-Host "`n複数のユーザーを選択できます。選択を終了するには 'done' と入力してください。"
-                    
-                    for ($i = 0; $i -lt $userOptions.Count; $i++) {
-                        Write-Host "$($i+1). $($userOptions[$i])"
-                    }
-                    
-                    do {
-                        $choice = Read-Host "ユーザー番号を入力 (複数可、カンマ区切り。終了は 'done')"
+                # ユーザーオプションの準備が完了したら、複数件ある場合の選択処理
+                if ($userCount -gt 1) {
+                    if ($AllowMultiple) {
+                        # 複数ユーザー選択
+                        Write-Host "`n複数のユーザーを選択できます。選択を終了するには 'done' と入力してください。"
                         
-                        if ($choice -eq "done") { break }
-                        
-                        $choices = $choice -split "," | ForEach-Object { $_.Trim() }
-                        
-                        foreach ($c in $choices) {
-                            if ([int]::TryParse($c, [ref]$null) -and [int]$c -ge 1 -and [int]$c -le $userOptions.Count) {
-                                $index = [int]$c - 1
-                                if (-not ($selectedUsers -contains $foundUsers[$index])) {
-                                    $selectedUsers += $foundUsers[$index]
-                                    Write-Host "  + 追加: $($foundUsers[$index].DisplayName)" -ForegroundColor Cyan
-                                }
-                            }
+                        for ($i = 0; $i -lt $userOptions.Count; $i++) {
+                            Write-Host "$($i+1). $($userOptions[$i])"
                         }
                         
-                        Write-Host "  現在の選択ユーザー数: $($selectedUsers.Count)" -ForegroundColor Yellow
-                    } while ($true)
-                }
-                else {
-                    # 単一ユーザー選択（1件の場合は既に上で処理済み）
-                    $userChoice = Show-Menu -Title "ユーザーを選択" -Options $userOptions
-                    if ($userChoice -eq "Q") { return $null }
-                    $selectedUsers = @($foundUsers[$userChoice])
+                        do {
+                            $choice = Read-Host "ユーザー番号を入力 (複数可、カンマ区切り。終了は 'done')"
+                            
+                            if ($choice -eq "done") { break }
+                            
+                            $choices = $choice -split "," | ForEach-Object { $_.Trim() }
+                            
+                            foreach ($c in $choices) {
+                                if ([int]::TryParse($c, [ref]$null) -and [int]$c -ge 1 -and [int]$c -le $userOptions.Count) {
+                                    $index = [int]$c - 1
+                                    if (-not ($selectedUsers -contains $foundUsers[$index])) {
+                                        $selectedUsers += $foundUsers[$index]
+                                        Write-Host "  + 追加: $($foundUsers[$index].DisplayName)" -ForegroundColor Cyan
+                                    }
+                                }
+                            }
+                            
+                            Write-Host "  現在の選択ユーザー数: $($selectedUsers.Count)" -ForegroundColor Yellow
+                        } while ($true)
+                    }
+                    else {
+                        # 単一ユーザー選択
+                        $userChoice = Show-Menu -Title "ユーザーを選択" -Options $userOptions
+                        if ($userChoice -eq "Q") { return $null }
+                        $selectedUsers = @($foundUsers[$userChoice])
+                    }
                 }
             }
             catch {
