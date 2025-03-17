@@ -468,21 +468,19 @@ function Select-TargetUsers {
                 }
                 
                 # 重複を削除
-                if ($foundUsers -and $foundUsers.Count -gt 0) {
-                    $foundUsers = $foundUsers | Sort-Object -Property Id -Unique |
-                                 Select-Object DisplayName, UserPrincipalName, Id, OnPremisesSamAccountName, GivenName, Surname
-                }
+                $foundUsers = $foundUsers | Sort-Object -Property Id -Unique |
+                             Select-Object DisplayName, UserPrincipalName, Id, OnPremisesSamAccountName, GivenName, Surname
                 
-                if (-not $foundUsers -or $foundUsers.Count -eq 0) {
+                if ($foundUsers.Count -eq 0) {
                     Write-Log "検索条件「$searchQuery」に一致するユーザーが見つかりませんでした" "WARNING"
                     return $null
                 }
                 
                 # 見つかったユーザー数の変数
-                $userCount = if ($foundUsers) { $foundUsers.Count } else { 0 }
+                $userCount = $foundUsers.Count
                 
-                # 完全に別の変数として作成し、null エラーを防止
-                $countMessage = "$userCount 人のユーザーが見つかりました"
+                # 完全に別の変数として作成
+                $countMessage = "{0} 人のユーザーが見つかりました" -f $userCount
                 Write-Log $countMessage "INFO"
                 
                 # ユーザーが1人の場合は、後続処理を一切スキップして即時リターン
