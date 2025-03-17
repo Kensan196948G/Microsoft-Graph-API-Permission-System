@@ -466,7 +466,7 @@ function Select-TargetUsers {
                 $userCount = $foundUsers.Count
                 
                 # 完全に別の変数として作成
-                $countMessage = [string]::Format("{0} 人のユーザーが見つかりました", $userCount)
+$countMessage = "{0} 人のユーザーが見つかりました" -f $userCount
                 Write-Log $countMessage "INFO"
                 
                 # ユーザーが1人の場合は、後続処理を一切スキップして即時リターン
@@ -1321,11 +1321,14 @@ if ($actionChoice -ne 3) {  # 表示モード以外
 
 # この部分は削除 - 既に上部の修正部分に含まれているため不要
 
+# 選択されたロール名の文字列を作成
+$selectedRoleNames = ($selectedRoles | ForEach-Object { $_.DisplayName }) -join ", "
+
 # 詳細な操作ログをファイルに記録
 $operationLogContent = "==== 操作詳細ログ ====`n"
 $operationLogContent += "処理時刻: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`n"
 $operationLogContent += "システム: $($selectedSystem.Name)`n"
-$operationLogContent += "パーミッション: $($selectedRole.DisplayName)`n"
+$operationLogContent += "パーミッション: $selectedRoleNames`n"
 $operationLogContent += "アクション: $($actionOptions[$actionChoice])`n"
 $operationLogContent += "`n--- ユーザー別処理結果 ---`n"
 
@@ -1366,7 +1369,7 @@ if ($errorDetails.Count -gt 0) {
 $operationSummary = @"
 ==== 操作サマリー ====
 システム: $($selectedSystem.Name)
-パーミッション: $($selectedRole.DisplayName)
+パーミッション: $selectedRoleNames
 アクション: $($actionOptions[$actionChoice])
 対象ユーザー数: $($targetUsers.Count)
 処理成功: $successCount
