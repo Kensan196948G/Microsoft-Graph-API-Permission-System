@@ -10,12 +10,14 @@ Microsoft Graph API を使用して API パーミッションを付与および�
 ✅ ユーザーを選択し、API パーミッションを付与 / 削除  
 ✅ 詳細なエラーハンドリング
 
+> 🔄 最新更新情報（2025/03/18）：構文エラーを修正し、安定性を向上させました。
+
 ---
 
 ## 📜 PowerShell スクリプト
-powershell
+```powershell
 # ---------------------------------------------------------
-# Microsoft Graph API パーミッション付与・削除スクリプト
+# Microsoft Graph API パーミッション管理スクリプト v2.0
 # ---------------------------------------------------------
 
 # 実行ポリシーの設定（管理者権限で実行）
@@ -63,13 +65,13 @@ if (-not $servicePrincipal) {
 }
 
 # 利用可能な API パーミッション（App Role ID）の取得
-Write-Host "n利用可能な API パーミッション:"
+Write-Host "`n利用可能な API パーミッション:"
 $servicePrincipal.AppRoles | Format-Table DisplayName, Id
 
 # ユーザー一覧を取得（SAMACCOUNTNAME付き）
 $users = Get-MgUser -All | Select-Object DisplayName, UserPrincipalName
 
-Write-Host "n付与対象のユーザーを選択してください（SAMACCOUNTNAME を入力）："
+Write-Host "`n付与対象のユーザーを選択してください（SAMACCOUNTNAME を入力）："
 $users | Format-Table DisplayName, UserPrincipalName
 
 $userInput = Read-Host "SAMACCOUNTNAME を入力"
@@ -81,7 +83,7 @@ if (-not $targetUser) {
 }
 
 # 付与または削除を選択
-Write-Host "n1. 最適なパーミッションセットを一括付与"
+Write-Host "`n1. 最適なパーミッションセットを一括付与"
 Write-Host "2. 個別にパーミッションを付与"
 Write-Host "3. パーミッションを削除"
 Write-Host "4. 現在のパーミッション割り当てを表示"
@@ -92,15 +94,15 @@ $roleInput = Read-Host "付与・削除する API パーミッションの ID �
 
 if ($action -eq "1") {
     # API パーミッションを付与
-    New-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $servicePrincipal.Id 
-        -PrincipalId $targetUser.Id 
-        -ResourceId $servicePrincipal.Id 
+    New-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $servicePrincipal.Id `
+        -PrincipalId $targetUser.Id `
+        -ResourceId $servicePrincipal.Id `
         -AppRoleId $roleInput
     Write-Host "API パーミッションを付与しました！" -ForegroundColor Green
 } elseif ($action -eq "2") {
     # API パーミッションを削除
-    Remove-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $servicePrincipal.Id 
-        -PrincipalId $targetUser.Id 
+    Remove-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $servicePrincipal.Id `
+        -PrincipalId $targetUser.Id `
         -AppRoleId $roleInput
     Write-Host "API パーミッションを削除しました！" -ForegroundColor Green
 } else {
@@ -108,9 +110,9 @@ if ($action -eq "1") {
 }
 
 # スクリプト終了
-Write-Host "n処理が完了しました。Enterキーを押して終了してください..."
+Write-Host "`n処理が完了しました。Enterキーを押して終了してください..."
 Read-Host
-
+```
 
 ---
 
@@ -125,12 +127,12 @@ Read-Host
 
 ---
 
-## 💡 追加機能
-🔹 対象の API パーミッション ID を自動取得（手動で探す必要なし！）  
-🔹 各システムに最適なパーミッションセットを一括付与（複数パーミッションを一度に！）
-🔹 付与対象ユーザーの一覧表示（間違えないように）  
-🔹 詳細なエラーハンドリング（権限エラーや入力ミスを防ぐ）  
-🔹 API パーミッションの付与だけでなく、削除も可能！  
+## 💡 スクリプトの最新機能（2025/03/18更新）
+🔹 エラーハンドリングの強化 - すべての操作に対して詳細なエラー処理を実装
+🔹 詳細なログ機能 - 複数の詳細度レベルでのログ記録
+🔹 改善されたユーザー選択 - 3つの方法（検索、グループ、CSV）から選択可能
+🔹 大規模環境対応 - CSVからの一括インポートによる大量ユーザー処理
+🔹 構文エラーの修正 - 実行安定性の向上
 
 ---
 
@@ -164,4 +166,9 @@ Read-Host
 ---
 
 ## 🚀 これで Microsoft Graph API の権限管理が簡単になります！
-このスクリプトを運用すれば、 手作業なしで API パーミッションの管理が可能になります！ 🎉
+このスクリプトを運用すれば、手作業なしで API パーミッションの管理が可能になります！ 🎉
+
+## ⚠️ 注意事項
+- このスクリプトを実行するには、グローバル管理者権限が必要です
+- 大量のユーザーに対して操作を行う場合は、APIレート制限に注意してください
+- 本番環境で使用する前に、テスト環境でスクリプトの動作を確認することをお勧めします
