@@ -375,41 +375,152 @@ function Select-TargetUsers {
     
     switch ($selectionMethod) {
         0 { # 個別ユーザーを検索
-            $searchQuery = Read-Host "ユーザー名またはメールアドレスを入力してください"
-            
-            try {
-                Write-Log "ユーザーを検索しています: $searchQuery" "INFO"
+            # ユーザー検索の再試行ループ
+            $searchSuccess = $false
+            while (-not $searchSuccess) {
+                $searchQuery = Read-Host "ユーザー名、メールアドレス、またはSAMアカウント名を入力してください"
                 
-                # 表示名で検索
-                $filter = "startswith(displayName,'$searchQuery') or startswith(userPrincipalName,'$searchQuery')"
-                $users = Get-MgUser -Filter $filter -Top 10 -ErrorAction Stop
-                
-                if (-not $users -or $users.Count -eq 0) {
-                    Write-Log "検索条件に一致するユーザーが見つかりませんでした" "WARNING"
-                    return $null
+                # 入力確認
+                $confirmed = $false
+                while (-not $confirmed) {
+                    $confirm = Read-Host "入力内容「$searchQuery」で検索しますか？ (Y/N)"
+                    if ($confirm -eq "Y" -or $confirm -eq "y") {
+                        $confirmed = $true
+                    }
+                    elseif ($confirm -eq "N" -or $confirm -eq "n") {
+                        $searchQuery = Read-Host "ユーザー名、メールアドレス、またはSAMアカウント名を入力してください"
+                    }
+                    else {
+                        Write-Host "Y または N を入力してください" -ForegroundColor Yellow
+                    }
                 }
                 
-                Write-Log "$($users.Count) 人のユーザーが見つかりました" "INFO"
-                
-                # ユーザーが1人の場合は自動選択
-                if ($users.Count -eq 1) {
-                    Write-Log "検索結果が1件のみのため、自動的に選択します: $($users[0].DisplayName)" "INFO"
-                    return @($users[0])
+                try {
+                    Write-Log "ユーザーを検索しています: $searchQuery" "INFO"
+                    
+                    # 複数の検索条件を組み合わせる
+                    # 1. 表示名での検索
+                    # 2. メールアドレスでの検索
+                    # 3. SAMアカウント名での検索
+                    $filter = "startswith(displayName,'$searchQuery') or startswith(userPrincipalName,'$searchQuery')"
+                    $users = Get-MgUser -Filter $filter -Top 10 -ErrorAction Stop
+                    
+                    # SAMアカウント名での検索を追加
+                    # OnPremisesSamAccountNameは直接フィルタできないため、別途取得
+                    if (-not $users -or $users.Count -eq 0) {
+                        Write-Log "表示名・メールアドレスで見つからなかったため、SAMアカウント名で検索します" "INFO"
+                        
+                        # 最初に1000人程度のユーザーを取得
+                        $allUsers = Get-MgUser -Top 1000 -Property DisplayName, UserPrincipalName, OnPremisesSamAccountName, Id -ErrorAction Stop
+                        
+                        # SAMアカウント名でフィルタリング
+                        $users = $allUsers | Where-Object { 
+                            $_.AdditionalProperties.onPremisesSamAccountName -and 
+                            $_.AdditionalProperties.onPremisesSamAccountName.StartsWith($searchQuery)
+                        }
+                    }
+                    
+                    if (-not $users -or $users.Count -eq 0) {
+                        Write-Log "検索条件に一致するユーザーが見つかりませんでした" "WARNING"
+                        $retry = Read-Host "再検索しますか？ (Y/N)"
+                        if ($retry -ne "Y" -and $retry -ne "y") {
+                            return $null
+                        }
+                        # ループ継続（再検索）
+                        continue
+                    }
+                    
+                    Write-Log "$($users.Count) 人のユーザーが見つかりました" "INFO"
+                    
+                    # ユーザーが1人の場合は確認後に選択
+                    if ($users.Count -eq 1) {
+                        $samAccountName = "N/A"
+                        if ($users[0].AdditionalProperties -and $users[0].AdditionalProperties.onPremisesSamAccountName) {
+                            $samAccountName = $users[0].AdditionalProperties.onPremisesSamAccountName
+                        }
+                        
+                        $userDisplayName = $users[0].DisplayName
+                        if ([string]::IsNullOrEmpty($userDisplayName)) {
+                            $userDisplayName = "(表示名なし)"
+                        }
+                        
+                        $userUPN = $users[0].UserPrincipalName
+                        
+                        Write-Host "見つかったユーザー: $userDisplayName ($userUPN) [SAM: $samAccountName]" -ForegroundColor Cyan
+                        $confirm = Read-Host "このユーザーを選択しますか？ (Y/N)"
+                        
+                        if ($confirm -eq "Y" -or $confirm -eq "y") {
+                            Write-Log "ユーザーを選択しました: $userDisplayName ($userUPN)" "INFO"
+                            $searchSuccess = $true
+                            return @($users[0])
+                        }
+                        else {
+                            # ループ継続（再検索）
+                            continue
+                        }
+                    }
+                    
+                    # 複数ユーザーの場合は選択肢を表示
+                    # 選択リストにSAMアカウント名を含める
+                    $usersWithSAM = @()
+                    foreach ($user in $users) {
+                        $samAccountName = "N/A"
+                        if ($user.AdditionalProperties.onPremisesSamAccountName) {
+                            $samAccountName = $user.AdditionalProperties.onPremisesSamAccountName
+                        }
+                        
+                        $usersWithSAM += [PSCustomObject]@{
+                            DisplayName = $user.DisplayName
+                            UserPrincipalName = $user.UserPrincipalName
+                            SamAccountName = $samAccountName
+                            User = $user
+                        }
+                    }
+                    
+                    # 表形式で表示
+                    Write-Host "`n===== 検索結果 =====" -ForegroundColor Cyan
+                    $format = "{0,-3} | {1,-20} | {2,-30} | {3,-15}"
+                    Write-Host ($format -f "No.", "表示名", "UPN", "SAMアカウント名")
+                    Write-Host ("-" * 75)
+                    
+                    for ($i = 0; $i -lt $usersWithSAM.Count; $i++) {
+                        # 表示名を処理（長すぎる場合は省略）
+                        $displayName = $usersWithSAM[$i].DisplayName
+                        if ($displayName.Length -gt 18) {
+                            $displayName = $displayName.Substring(0, 15) + "..."
+                        }
+                        
+                        # UPNを処理（長すぎる場合は省略）
+                        $upn = $usersWithSAM[$i].UserPrincipalName
+                        if ($upn.Length -gt 28) {
+                            $upn = $upn.Substring(0, 25) + "..."
+                        }
+                        
+                        # 表示
+                        Write-Host ($format -f ($i+1), $displayName, $upn, $usersWithSAM[$i].SamAccountName)
+                    }
+                    
+                    # ユーザー選択
+                    $userOptions = $users | ForEach-Object {
+                        $sam = if ($_.AdditionalProperties.onPremisesSamAccountName) { $_.AdditionalProperties.onPremisesSamAccountName } else { "N/A" }
+                        "$($_.DisplayName) ($($_.UserPrincipalName)) [SAM: $sam]"
+                    }
+                    
+                    $userChoice = Show-Menu -Title "ユーザーを選択" -Options $userOptions
+                    if ($userChoice -eq "Q") { return $null }
+                    
+                    $selectedUsers = @($users[$userChoice])
+                    Write-Log "ユーザーを選択しました: $($selectedUsers[0].DisplayName)" "INFO"
+                    $searchSuccess = $true
                 }
-                
-                # 選択リストの作成
-                $userOptions = $users | ForEach-Object {
-                    "$($_.DisplayName) ($($_.UserPrincipalName))"
+                catch {
+                    Write-Log "ユーザー検索中にエラーが発生しました: $_" "ERROR"
+                    $retry = Read-Host "再検索しますか？ (Y/N)"
+                    if ($retry -ne "Y" -and $retry -ne "y") {
+                        return $null
+                    }
+                    # ループ継続（再検索）
                 }
-                
-                # ユーザー選択
-                $userChoice = Show-Menu -Title "ユーザーを選択" -Options $userOptions
-                if ($userChoice -eq "Q") { return $null }
-                $selectedUsers = @($users[$userChoice])
-            }
-            catch {
-                Write-Log "ユーザー検索中にエラーが発生しました: $_" "ERROR"
-                return $null
             }
         }
         1 { # セキュリティグループからユーザーを選択
@@ -538,9 +649,470 @@ function Select-TargetUsers {
     return $selectedUsers
 }
 
+# システム情報の定義
+$systemDefinitions = @{
+    "OneDrive" = @{
+        Name = "OneDrive for Business"
+        AppName = "Office 365 SharePoint Online"
+        AppRoles = @(
+            @{
+                Name = "User.Read.All"
+                Description = "ユーザー情報へのアクセス"
+            },
+            @{
+                Name = "Directory.Read.All"
+                Description = "組織構造情報へのアクセス"
+            },
+            @{
+                Name = "Files.ReadWrite.All"
+                Description = "OneDriveファイルの読み書き"
+            }
+        )
+    };
+    "Teams" = @{
+        Name = "Microsoft Teams"
+        AppName = "Office 365 Teams"
+        AppRoles = @(
+            @{
+                Name = "User.Read.All"
+                Description = "ユーザー情報へのアクセス"
+            },
+            @{
+                Name = "Directory.Read.All"
+                Description = "組織構造情報へのアクセス"
+            },
+            @{
+                Name = "Team.ReadWrite.All"
+                Description = "Teams管理"
+            },
+            @{
+                Name = "Channel.ReadWrite.All"
+                Description = "チャネル管理"
+            },
+            @{
+                Name = "Chat.ReadWrite.All"
+                Description = "チャット管理"
+            }
+        )
+    };
+    "EntraID" = @{
+        Name = "Microsoft EntraID"
+        AppName = "Microsoft Graph"
+        AppRoles = @(
+            @{
+                Name = "User.Read.All"
+                Description = "ユーザー情報へのアクセス"
+            },
+            @{
+                Name = "Directory.ReadWrite.All"
+                Description = "ディレクトリデータの管理"
+            },
+            @{
+                Name = "Group.ReadWrite.All"
+                Description = "グループ管理"
+            },
+            @{
+                Name = "RoleManagement.ReadWrite.Directory"
+                Description = "ロール管理"
+            }
+        )
+    };
+    "Exchange" = @{
+        Name = "Exchange Online"
+        AppName = "Office 365 Exchange Online"
+        AppRoles = @(
+            @{
+                Name = "User.Read.All"
+                Description = "ユーザー情報へのアクセス"
+            },
+            @{
+                Name = "Directory.Read.All"
+                Description = "組織構造情報へのアクセス"
+            },
+            @{
+                Name = "Mail.ReadWrite.All"
+                Description = "メール管理"
+            },
+            @{
+                Name = "MailboxSettings.ReadWrite"
+                Description = "メールボックス設定管理"
+            },
+            @{
+                Name = "Calendars.ReadWrite.All"
+                Description = "カレンダー管理"
+            }
+        )
+    }
+}
+
+# App Role取得関数
+function Get-AppRoleByName {
+    param (
+        [Parameter(Mandatory = $true)]
+        [Microsoft.Graph.PowerShell.Models.MicrosoftGraphServicePrincipal]$ServicePrincipal,
+        
+        [Parameter(Mandatory = $true)]
+        [string]$RoleName
+    )
+    
+    try {
+        $appRole = $ServicePrincipal.AppRoles | Where-Object { $_.DisplayName -eq $RoleName -or $_.Value -eq $RoleName }
+        
+        if (-not $appRole) {
+            Write-Log "AppRole '$RoleName' が見つかりませんでした" "WARNING"
+            return $null
+        }
+        
+        Write-Log "AppRole '$($appRole.DisplayName)' (ID: $($appRole.Id)) を取得しました" "DEBUG" -NoConsole
+        return $appRole
+    }
+    catch {
+        Write-Log "AppRole取得中にエラーが発生しました: $_" "ERROR"
+        return $null
+    }
+}
+
+# パーミッション付与関数
+function Grant-ApiPermission {
+    param (
+        [Parameter(Mandatory = $true)]
+        [Microsoft.Graph.PowerShell.Models.MicrosoftGraphServicePrincipal]$ServicePrincipal,
+        
+        [Parameter(Mandatory = $true)]
+        [Microsoft.Graph.PowerShell.Models.MicrosoftGraphAppRole]$AppRole,
+        
+        [Parameter(Mandatory = $true)]
+        [Microsoft.Graph.PowerShell.Models.MicrosoftGraphUser]$TargetUser
+    )
+    
+    try {
+        Write-Log "ユーザー '$($TargetUser.DisplayName)' ($($TargetUser.UserPrincipalName)) にパーミッション '$($AppRole.DisplayName)' を付与しています..." "INFO"
+        
+        # ユーザーの詳細情報を確認
+        Write-Log "ユーザーID: $($TargetUser.Id)" "DEBUG" -NoConsole
+        Write-Log "サービスプリンシパルID: $($ServicePrincipal.Id)" "DEBUG" -NoConsole
+        Write-Log "アプリロールID: $($AppRole.Id)" "DEBUG" -NoConsole
+        
+        # ユーザー状態チェック
+        try {
+            $userDetail = Get-MgUser -UserId $TargetUser.Id -ErrorAction Stop
+            $userState = if ($userDetail.AccountEnabled) { "有効" } else { "無効" }
+            Write-Log "ユーザーアカウントの状態: $userState" "INFO"
+            
+            if (-not $userDetail.AccountEnabled) {
+                Write-Log "ユーザーアカウントが無効化されているため、パーミッションを付与できません" "ERROR"
+                Write-Host "エラー: ユーザーアカウントが無効化されています。アカウントを有効化してから再試行してください。" -ForegroundColor Red
+                return $false
+            }
+        }
+        catch {
+            Write-Log "ユーザー状態の確認中にエラーが発生しました: $_" "WARNING"
+        }
+        
+        # 現在のアプリロール割り当てを確認
+        try {
+            $existingAssignment = Get-MgUserAppRoleAssignment -UserId $TargetUser.Id -All -ErrorAction Stop | Where-Object { 
+                $_.ResourceId -eq $ServicePrincipal.Id -and $_.AppRoleId -eq $AppRole.Id 
+            }
+            
+            if ($existingAssignment) {
+                Write-Log "ユーザーには既にこのパーミッションが付与されています" "WARNING"
+                Write-Host "情報: ユーザー '$($TargetUser.DisplayName)' には既にパーミッション '$($AppRole.DisplayName)' が付与されています" -ForegroundColor Yellow
+                return $false
+            }
+        }
+        catch {
+            Write-Log "既存の割り当て確認中にエラーが発生しました: $_" "ERROR"
+            Write-Host "エラー: 既存のパーミッション確認中に問題が発生しました。詳細はログファイルを確認してください。" -ForegroundColor Red
+            Write-ErrorDetail $_ "既存のパーミッション確認中にエラーが発生"
+            return $false
+        }
+        
+        # 新しいアプリロール割り当てを作成
+        try {
+            $params = @{
+                PrincipalId = $TargetUser.Id
+                ResourceId = $ServicePrincipal.Id
+                AppRoleId = $AppRole.Id
+            }
+            
+            Write-Log "パーミッション割り当てパラメータ: $($params | ConvertTo-Json -Compress)" "DEBUG" -NoConsole
+            
+            $newAssignment = New-MgUserAppRoleAssignment -UserId $TargetUser.Id -BodyParameter $params -ErrorAction Stop
+            
+            if ($newAssignment) {
+                Write-Log "パーミッション '$($AppRole.DisplayName)' の付与に成功しました" "SUCCESS"
+                Write-Host "成功: ユーザー '$($TargetUser.DisplayName)' にパーミッション '$($AppRole.DisplayName)' を付与しました" -ForegroundColor Green
+                return $true
+            }
+            else {
+                Write-Log "パーミッション付与に失敗しました（結果が空）" "ERROR"
+                Write-Host "エラー: パーミッション付与に失敗しました。操作は完了しましたが、結果が返されませんでした。" -ForegroundColor Red
+                return $false
+            }
+        }
+        catch {
+            # エラーの種類に応じた詳細メッセージ
+            $errorMsg = "詳細な理由: "
+            
+            if ($_.Exception.Message -match "Permission") {
+                $errorMsg += "権限不足。必要な管理者権限があることを確認してください。"
+            }
+            elseif ($_.Exception.Message -match "AppRole") {
+                $errorMsg += "指定されたAPIパーミッション（AppRole）が見つからないか、無効です。"
+            }
+            elseif ($_.Exception.Message -match "Resource") {
+                $errorMsg += "指定されたリソース（ServicePrincipal）が見つからないか、アクセスできません。"
+            }
+            elseif ($_.Exception.Message -match "Principal") {
+                $errorMsg += "指定されたユーザー（Principal）が見つからないか、アクセスできません。"
+            }
+            elseif ($_.Exception.Message -match "Conflict") {
+                $errorMsg += "競合が発生しました。既存の割り当てが存在する可能性があります。"
+            }
+            elseif ($_.Exception.Message -match "Unauthorized") {
+                $errorMsg += "認証エラー。サインインしているアカウントに必要な権限がない可能性があります。"
+            }
+            else {
+                $errorMsg += $_.Exception.Message
+            }
+            
+            Write-Log "パーミッション付与中にエラーが発生: $errorMsg" "ERROR"
+            Write-Host "エラー: パーミッション '$($AppRole.DisplayName)' の付与に失敗しました" -ForegroundColor Red
+            Write-Host $errorMsg -ForegroundColor Red
+            
+            # 詳細なエラー情報をログに記録
+            Write-ErrorDetail $_ "パーミッション付与中にエラーが発生しました"
+            return $false
+        }
+    }
+    catch {
+        # 予期しない全体的なエラー
+        Write-Log "予期しないエラーが発生しました: $_" "ERROR"
+        Write-Host "致命的なエラー: パーミッション処理中に予期しない問題が発生しました。詳細はログを確認してください。" -ForegroundColor Red
+        Write-ErrorDetail $_ "パーミッション付与中に予期しないエラーが発生"
+        return $false
+    }
+}
+
+# パーミッション削除関数
+function Remove-ApiPermission {
+    param (
+        [Parameter(Mandatory = $true)]
+        [Microsoft.Graph.PowerShell.Models.MicrosoftGraphServicePrincipal]$ServicePrincipal,
+        
+        [Parameter(Mandatory = $true)]
+        [Microsoft.Graph.PowerShell.Models.MicrosoftGraphAppRole]$AppRole,
+        
+        [Parameter(Mandatory = $true)]
+        [Microsoft.Graph.PowerShell.Models.MicrosoftGraphUser]$TargetUser
+    )
+    
+    try {
+        Write-Log "ユーザー '$($TargetUser.DisplayName)' ($($TargetUser.UserPrincipalName)) からパーミッション '$($AppRole.DisplayName)' を削除しています..." "INFO"
+        
+        # 現在のアプリロール割り当てを確認
+        $existingAssignment = Get-MgUserAppRoleAssignment -UserId $TargetUser.Id -All | Where-Object { 
+            $_.ResourceId -eq $ServicePrincipal.Id -and $_.AppRoleId -eq $AppRole.Id 
+        }
+        
+        if (-not $existingAssignment) {
+            Write-Log "ユーザーにはこのパーミッションが付与されていません" "WARNING"
+            return $false
+        }
+        
+        # アプリロール割り当てを削除
+        Remove-MgUserAppRoleAssignment -UserId $TargetUser.Id -AppRoleAssignmentId $existingAssignment.Id
+        
+        Write-Log "パーミッション '$($AppRole.DisplayName)' の削除に成功しました" "SUCCESS"
+        return $true
+    }
+    catch {
+        Write-ErrorDetail $_ "パーミッション削除中にエラーが発生しました"
+        return $false
+    }
+}
+
+# すべてのパーミッションを一括付与する関数
+function Grant-AllApiPermissions {
+    param (
+        [Parameter(Mandatory = $true)]
+        [Microsoft.Graph.PowerShell.Models.MicrosoftGraphServicePrincipal]$ServicePrincipal,
+        
+        [Parameter(Mandatory = $true)]
+        [array]$AppRoles,
+        
+        [Parameter(Mandatory = $true)]
+        [Microsoft.Graph.PowerShell.Models.MicrosoftGraphUser]$TargetUser
+    )
+    
+    try {
+        Write-Log "ユーザー '$($TargetUser.DisplayName)' ($($TargetUser.UserPrincipalName)) に全パーミッションを一括付与しています..." "INFO"
+        
+        $successCount = 0
+        $failCount = 0
+        
+        foreach ($roleName in $AppRoles) {
+            $appRole = Get-AppRoleByName -ServicePrincipal $ServicePrincipal -RoleName $roleName.Name
+            
+            if ($appRole) {
+                $result = Grant-ApiPermission -ServicePrincipal $ServicePrincipal -AppRole $appRole -TargetUser $TargetUser
+                
+                if ($result) {
+                    $successCount++
+                }
+                else {
+                    $failCount++
+                }
+            }
+            else {
+                Write-Log "AppRole '$($roleName.Name)' が見つからないためスキップします" "WARNING"
+                $failCount++
+            }
+        }
+        
+        Write-Log "一括付与結果: 成功=$successCount, 失敗=$failCount" "INFO"
+        return ($failCount -eq 0)
+    }
+    catch {
+        Write-ErrorDetail $_ "一括パーミッション付与中にエラーが発生しました"
+        return $false
+    }
+}
+
+# 現在のパーミッション状態を確認する関数
+function Get-CurrentPermissions {
+    param (
+        [Parameter(Mandatory = $true)]
+        [Microsoft.Graph.PowerShell.Models.MicrosoftGraphServicePrincipal]$ServicePrincipal,
+        
+        [Parameter(Mandatory = $true)]
+        [Microsoft.Graph.PowerShell.Models.MicrosoftGraphUser]$TargetUser
+    )
+    
+    try {
+        Write-Log "ユーザー '$($TargetUser.DisplayName)' ($($TargetUser.UserPrincipalName)) の現在のパーミッションを確認しています..." "INFO"
+        
+        $currentAssignments = Get-MgUserAppRoleAssignment -UserId $TargetUser.Id -All | Where-Object { 
+            $_.ResourceId -eq $ServicePrincipal.Id 
+        }
+        
+        if (-not $currentAssignments -or $currentAssignments.Count -eq 0) {
+            Write-Log "このアプリケーションに対するパーミッションはありません" "INFO"
+            return @()
+        }
+        
+        $permissions = @()
+        foreach ($assignment in $currentAssignments) {
+            $appRole = $ServicePrincipal.AppRoles | Where-Object { $_.Id -eq $assignment.AppRoleId }
+            
+            if ($appRole) {
+                $permissions += [PSCustomObject]@{
+                    DisplayName = $appRole.DisplayName
+                    Value = $appRole.Value
+                    Id = $appRole.Id
+                    AssignmentId = $assignment.Id
+                }
+            }
+        }
+        
+        Write-Log "$($permissions.Count) 件のパーミッションが見つかりました" "INFO"
+        return $permissions
+    }
+    catch {
+        Write-ErrorDetail $_ "現在のパーミッション確認中にエラーが発生しました"
+        return @()
+    }
+}
+
+# ユーザーの表示（サムアカウント名付き）
+function Show-UsersWithSamAccountName {
+    param (
+        [Parameter(Mandatory = $true)]
+        [array]$Users
+    )
+    
+    $usersWithSAM = @()
+    foreach ($user in $Users) {
+        try {
+            # オンプレミスプロパティを取得
+            $userDetail = Get-MgUser -UserId $user.Id -Property OnPremisesSamAccountName, DisplayName, UserPrincipalName, Id
+            
+            $samAccountName = if ($userDetail.AdditionalProperties.onPremisesSamAccountName) {
+                $userDetail.AdditionalProperties.onPremisesSamAccountName
+            } else {
+                "N/A"
+            }
+            
+            $usersWithSAM += [PSCustomObject]@{
+                DisplayName = $user.DisplayName
+                UserPrincipalName = $user.UserPrincipalName
+                SamAccountName = $samAccountName
+                Id = $user.Id
+                User = $user
+            }
+        }
+        catch {
+            Write-Log "ユーザー情報取得中にエラー: $($user.UserPrincipalName) - $_" "WARNING"
+            $usersWithSAM += [PSCustomObject]@{
+                DisplayName = $user.DisplayName
+                UserPrincipalName = $user.UserPrincipalName
+                SamAccountName = "取得エラー"
+                Id = $user.Id
+                User = $user
+            }
+        }
+    }
+    
+    # 表形式で表示
+    Write-Host "`n===== ユーザー一覧 =====" -ForegroundColor Cyan
+    $format = "{0,-3} | {1,-20} | {2,-40} | {3,-15}"
+    Write-Host ($format -f "No.", "表示名", "UPN", "SAMアカウント名")
+    Write-Host ("-" * 85)
+    
+    for ($i = 0; $i -lt $usersWithSAM.Count; $i++) {
+        # 表示名を処理（長すぎる場合は省略）
+        $displayName = $usersWithSAM[$i].DisplayName
+        if ($displayName.Length -gt 18) {
+            $displayName = $displayName.Substring(0, 15) + "..."
+        }
+        
+        # UPNを処理（長すぎる場合は省略）
+        $upn = $usersWithSAM[$i].UserPrincipalName
+        if ($upn.Length -gt 38) {
+            $upn = $upn.Substring(0, 35) + "..."
+        }
+        
+        # 表示
+        Write-Host ($format -f ($i+1), $displayName, $upn, $usersWithSAM[$i].SamAccountName)
+    }
+    
+    return $usersWithSAM
+}
+
 # メイン処理の開始点
 Write-Log "処理を開始します" "INFO"
 try {
+    # Microsoft Graph モジュールの確認とインストール
+    if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
+        Write-Log "Microsoft Graph モジュールがインストールされていません。インストールを試みます..." "INFO"
+        try {
+            Install-Module -Name Microsoft.Graph -Scope CurrentUser -Force -AllowClobber
+            Write-Log "Microsoft Graph モジュールのインストールに成功しました" "SUCCESS"
+        }
+        catch {
+            Write-ErrorDetail $_ "Microsoft Graph モジュールのインストールに失敗しました"
+            Write-Log "管理者権限で次のコマンドを実行してください: Install-Module -Name Microsoft.Graph -Scope CurrentUser -Force" "ERROR"
+            exit 1
+        }
+    }
+    
+    # 必要なモジュールをインポート
+    Import-Module Microsoft.Graph.Authentication
+    Import-Module Microsoft.Graph.Users
+    Import-Module Microsoft.Graph.Groups
+    Import-Module Microsoft.Graph.Applications
+    
     # Microsoft Graphへの接続
     $connected = Connect-ToGraph
     if (-not $connected) {
@@ -568,16 +1140,182 @@ try {
         exit 0
     }
     
-    # この後の処理はswitch文で分岐させて実装する予定です。
-    # 現在のバージョンは構文エラーを修正するための簡略版です。
+    # 対象システムの選択
+    $systemKeys = @($systemDefinitions.Keys)
+    $systemOptions = $systemKeys | ForEach-Object { $systemDefinitions[$_].Name }
+    $systemChoice = Show-Menu -Title "対象システムの選択" -Options $systemOptions
+    if ($systemChoice -eq "Q") {
+        Write-Log "ユーザーによりスクリプトが終了されました" "INFO"
+        exit 0
+    }
     
-    Write-Log "スクリプトが正常に構文解析されました。" "SUCCESS"
+    $selectedKey = $systemKeys[$systemChoice]
+    $selectedSystem = $systemDefinitions[$selectedKey]
+    Write-Log "選択されたシステム: $($selectedSystem.Name) (キー: $selectedKey)" "INFO"
+    
+    # サービスプリンシパル取得
+    $servicePrincipal = Get-ServicePrincipalForSystem -SystemInfo $selectedSystem
+    if (-not $servicePrincipal) {
+        Write-Log "サービスプリンシパル取得に失敗しました。スクリプトを終了します。" "ERROR"
+        exit 1
+    }
+    
+    # ユーザー選択
+    $targetUsers = Select-TargetUsers -AllowMultiple:($mainChoice -ne 2)
+    if (-not $targetUsers -or $targetUsers.Count -eq 0) {
+        Write-Log "ユーザーが選択されませんでした。スクリプトを終了します。" "WARNING"
+        exit 0
+    }
+    
+    # SAMアカウント名を含めて表示
+    $displayedUsers = Show-UsersWithSamAccountName -Users $targetUsers
+    
+    # 機能に応じた処理
+    switch ($mainChoice) {
+        0 { # APIパーミッションの付与
+            $permissionOptions = @(
+                "個別のパーミッションを選択する",
+                "システムに最適なパーミッションセットを一括付与する"
+            )
+            
+            $permChoice = Show-Menu -Title "パーミッション付与方法" -Options $permissionOptions
+            if ($permChoice -eq "Q") {
+                Write-Log "ユーザーによりスクリプトが終了されました" "INFO"
+                exit 0
+            }
+            
+            if ($permChoice -eq 0) { # 個別のパーミッションを選択
+                $roleOptions = $selectedSystem.AppRoles | ForEach-Object { "$($_.Name) - $($_.Description)" }
+                $roleChoice = Show-Menu -Title "付与するAPIパーミッション" -Options $roleOptions
+                if ($roleChoice -eq "Q") {
+                    Write-Log "ユーザーによりスクリプトが終了されました" "INFO"
+                    exit 0
+                }
+                
+                $selectedRole = $selectedSystem.AppRoles[$roleChoice]
+                Write-Log "選択されたパーミッション: $($selectedRole.Name)" "INFO"
+                
+                $appRole = Get-AppRoleByName -ServicePrincipal $servicePrincipal -RoleName $selectedRole.Name
+                if (-not $appRole) {
+                    Write-Log "AppRoleの取得に失敗しました。スクリプトを終了します。" "ERROR"
+                    exit 1
+                }
+                
+                $successCount = 0
+                $failCount = 0
+                
+                foreach ($user in $targetUsers) {
+                    $result = Grant-ApiPermission -ServicePrincipal $servicePrincipal -AppRole $appRole -TargetUser $user
+                    if ($result) {
+                        $successCount++
+                    }
+                    else {
+                        $failCount++
+                    }
+                }
+                
+                Write-Log "パーミッション付与結果: 成功=$successCount, 失敗=$failCount" "INFO"
+            }
+            else { # 一括付与
+                $successCount = 0
+                $failCount = 0
+                
+                foreach ($user in $targetUsers) {
+                    $result = Grant-AllApiPermissions -ServicePrincipal $servicePrincipal -AppRoles $selectedSystem.AppRoles -TargetUser $user
+                    if ($result) {
+                        $successCount++
+                    }
+                    else {
+                        $failCount++
+                    }
+                }
+                
+                Write-Log "一括パーミッション付与結果: 成功=$successCount, 失敗=$failCount" "INFO"
+            }
+        }
+        1 { # APIパーミッションの削除
+            # 現在のパーミッションを表示して選択
+            if ($targetUsers.Count -gt 1) {
+                Write-Log "パーミッション削除は一度に1ユーザーのみ対応しています。最初のユーザーを処理します。" "WARNING"
+            }
+            
+            $user = $targetUsers[0]
+            $currentPermissions = Get-CurrentPermissions -ServicePrincipal $servicePrincipal -TargetUser $user
+            
+            if ($currentPermissions.Count -eq 0) {
+                Write-Log "$($user.DisplayName) には削除するパーミッションがありません" "WARNING"
+                exit 0
+            }
+            
+            $permOptions = $currentPermissions | ForEach-Object { "$($_.DisplayName) - $($_.Value)" }
+            $permChoice = Show-Menu -Title "削除するAPIパーミッション" -Options $permOptions
+            if ($permChoice -eq "Q") {
+                Write-Log "ユーザーによりスクリプトが終了されました" "INFO"
+                exit 0
+            }
+            
+            $selectedPerm = $currentPermissions[$permChoice]
+            
+            # AppRoleオブジェクトを作成
+            $appRole = [PSCustomObject]@{
+                Id = $selectedPerm.Id
+                DisplayName = $selectedPerm.DisplayName
+            }
+            
+            $result = Remove-ApiPermission -ServicePrincipal $servicePrincipal -AppRole $appRole -TargetUser $user
+            if ($result) {
+                Write-Log "パーミッション削除に成功しました" "SUCCESS"
+            }
+            else {
+                Write-Log "パーミッション削除に失敗しました" "ERROR"
+            }
+        }
+        2 { # 現在のパーミッション状態を確認
+            $user = $targetUsers[0]
+            $currentPermissions = Get-CurrentPermissions -ServicePrincipal $servicePrincipal -TargetUser $user
+            
+            if ($currentPermissions.Count -eq 0) {
+                Write-Log "$($user.DisplayName) にはパーミッションが設定されていません" "INFO"
+            }
+            else {
+                Write-Host "`n===== $($user.DisplayName) の現在のパーミッション =====" -ForegroundColor Cyan
+                $format = "{0,-40} | {1,-40}"
+                Write-Host ($format -f "パーミッション名", "値")
+                Write-Host ("-" * 85)
+                
+                foreach ($perm in $currentPermissions) {
+                    Write-Host ($format -f $perm.DisplayName, $perm.Value)
+                }
+            }
+        }
+    }
     
     # 実行サマリーを記録
     Write-ExecutionSummary
+    
+    # スクリプト終了時に一時停止（プロンプトが閉じないようにする）
+    Write-Host "`n処理が完了しました。何かキーを押すと終了します..." -ForegroundColor Green
+    if ($Host.Name -eq "ConsoleHost") {
+        # コンソールから実行されている場合は、キー入力を待つ
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    }
+    else {
+        # PowerShell ISEやその他のホストからの実行時は一時停止
+        Start-Sleep -Seconds 3
+    }
 }
 catch {
     Write-ErrorDetail $_ "メイン処理の実行中にエラーが発生しました"
     Write-Log "スクリプトは異常終了しました。ログを確認してください: $logFile" "ERROR"
+    
+    # エラー発生時も一時停止（ユーザーがエラーメッセージを確認できるようにする）
+    Write-Host "`nエラーが発生しました。何かキーを押すと終了します..." -ForegroundColor Red
+    if ($Host.Name -eq "ConsoleHost") {
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    }
+    else {
+        Start-Sleep -Seconds 5
+    }
+    
     exit 1
 }
